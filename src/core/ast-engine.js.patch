@@ -1,9 +1,0 @@
---- a/src/core/ast-engine.js
-+++ b/src/core/ast-engine.js
-@@ -export function extractContract(symbol, code, language) {
-+export function extractContract(symbol, code, language) {
-   const lines = code.split("\n");
-   const startLine = (symbol.startLine || 1) - 1;
-   const endLine = symbol.endLine || startLine + 1;
-   const body = lines.slice(startLine, endLine + 1).join("\n");
-+  return { signature, effects, throws, calls, properties, confidence, body, startLine: startLine + 1, endLine };
