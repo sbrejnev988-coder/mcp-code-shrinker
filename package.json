@@ -1,6 +1,6 @@
 {
   "name": "mcp-code-shrinker",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Semantic Context Compiler for AI coding: stratified context with exact-source escalation. -60-80% tokens with exact-source preservation.",
   "type": "module",
   "main": "src/index.js",

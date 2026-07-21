@@ -14,7 +14,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync, existsSync, realpathSync } from "fs";
-import { resolve, relative, isAbsolute } from "path";
+import { resolve, relative, isAbsolute, delimiter } from "path"; import { delimiter } from "path";
 import { randomUUID } from "crypto";
 import { buildContextPacket } from "./compiler/packet-builder.js";
 import { parseFile, extractContract } from "./core/ast-engine.js";
@@ -82,8 +82,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 async function handleProjectScan(args) {
-  const root = CONFIGURED_ROOTS[0] || resolve(args.path || ".");
-  if (args.path) { const scanPath = resolve(args.path); if (CONFIGURED_ROOTS.length > 0 && !CONFIGURED_ROOTS.some(r => isInside(r, scanPath))) throw new Error('scan path outside configured roots'); } else if (CONFIGURED_ROOTS.length === 0) { throw new Error('NO_ALLOWED_ROOT_CONFIGURED. Set CODE_SHRINKER_ALLOWED_ROOTS.'); }
+  if (CONFIGURED_ROOTS.length === 0) throw new Error('NO_ALLOWED_ROOT_CONFIGURED');
+  const root = args.path ? await resolveInsideRoot(args.path) : CONFIGURED_ROOTS[0];
   callGraph = new CallGraph(root);
   validator = new PatchValidator({ projectRoot: root });
   const stats = callGraph.scan({ exclude: args.exclude });
@@ -215,7 +215,7 @@ async function handlePatchPropose(args) {
     }
   }
   const patchId = `patch_${randomUUID().slice(0, 12)}`;
-  const ref = { contextId: args.contextId, contextRevision: packet.revision, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
+  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: tf, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
   return ok({ patchId, contextId: args.contextId, edits: args.edits.map(e => ({ ...e, status: "proposed" })), note: "Use patch.validate with this patchId next." });
 }
 
@@ -243,8 +243,19 @@ async function handlePatchApply(args) {
 
 function ok(d) { return { content: [{ type: "text", text: JSON.stringify(d, null, 2) }], structuredContent: d, isError: false }; }
 function err(m) { return { content: [{ type: "text", text: m }], isError: true }; }
+
+// Unified symbol identity — same ID across all tools
+function symId(root, filePath, parsed, sym) {
+  return createSymbolId({
+    projectRelativePath: relative(root || '.', filePath),
+    language: parsed.language,
+    nodeType: sym.kind,
+    qualifiedName: sym.qualifiedName,
+    signature: sym.signature,
+  });
+}
 function estimateTokens(t) { return Math.ceil(String(t).length / 1.3); }
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("[code-shrinker v0.3.4] ready — all P0 bugs fixed");
+console.error("[code-shrinker v' + VERSION + '] ready — strict chain — all P0 bugs fixed");
