@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ═══ Code Shrinker MCP Server v0.3.2 ═══
+// ═══ Code Shrinker MCP Server v0.3.3 ═══
 // Stabilization release — all P0 bugs fixed
 // FIXED: Full body extraction → symbol.source/symbolRevision correct
 // FIXED: require() removed, node --check for syntax
@@ -29,7 +29,7 @@ const sessions = new Map();
 const patches = new Map(); // patchId → { contextId, edits }
 let callGraph = null;
 let validator = null;
-let allowedRoots = [];
+const CONFIGURED_ROOTS = (process.env.CODE_SHRINKER_ALLOWED_ROOTS || '').split(':').filter(Boolean).map(p => resolve(p));
 
 function isInside(root, candidate) {
   const rel = relative(root, candidate);
@@ -39,8 +39,8 @@ function isInside(root, candidate) {
 async function resolveInsideRoot(inputPath) {
   try {
     const rp = realpathSync(inputPath);
-    if (allowedRoots.length === 0) return rp;
-    if (!allowedRoots.some(root => isInside(root, rp))) throw new Error(`PATH_OUTSIDE_ROOT: ${rp}`);
+    if (CONFIGURED_ROOTS.length === 0) throw new Error('NO_ALLOWED_ROOT_CONFIGURED. Set CODE_SHRINKER_ALLOWED_ROOTS env var.');
+    if (!CONFIGURED_ROOTS.some(root => isInside(root, rp))) throw new Error(`PATH_OUTSIDE_ROOT: ${rp}`);
     return rp;
   } catch (e) { if (e.message.startsWith("PATH_OUTSIDE")) throw e; throw new Error(`PATH_RESOLVE: ${e.message}`); }
 }
@@ -82,8 +82,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 async function handleProjectScan(args) {
-  const root = resolve(args.path || ".");
-  allowedRoots = [root];
+  const root = CONFIGURED_ROOTS[0] || resolve(args.path || ".");
+  if (args.path) { const scanPath = resolve(args.path); if (!CONFIGURED_ROOTS.some(r => isInside(r, scanPath))) throw new Error("scan path outside configured roots"); }
   callGraph = new CallGraph(root);
   validator = new PatchValidator({ projectRoot: root });
   const stats = callGraph.scan({ exclude: args.exclude });
@@ -153,6 +153,7 @@ async function handleContextCreate(args) {
     if (callers.length) packet.packet.callers = callers;
     if (tests.length) packet.packet.relatedTests = tests;
   }
+  packet._targetFile = tf;
   sessions.set(packet.contextId, packet);
   return ok({ contextId: packet.contextId, revision: packet.revision, task: packet.task, layers: packet.layers, tokens: packet.tokens, risk: packet.risk, qualitySatisfied: packet.qualitySatisfied, estimatedQuality: packet.estimatedQuality, loss: { removed: packet.loss.removed, preserved: packet.loss.preserved, risk: packet.loss.risk }, aliases: packet.aliases, packet: packet.packet, omitted: packet.omitted });
 }
@@ -166,7 +167,7 @@ async function handleContextExpand(args) {
     // FIXED: path validation on expand requests
     let fp = req.filePath;
     if (fp) fp = await resolveInsideRoot(fp);
-    else fp = args.targetFile || packet.packet.project?.project || ".";
+    else if (packet._targetFile) fp = packet._targetFile; else continue;
     try {
       const parsed = parseFile(fp);
       const sym = parsed.symbols.find(s => s.qualifiedName === req.symbol || s.name === req.symbol);

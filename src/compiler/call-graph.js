@@ -1,11 +1,11 @@
-// ═══ Call Graph v0.3.2 ═══
-// FIXED: _contract attached at index time → edges actually built
-// FIXED: Multi-pass: index all → resolve imports → extract calls → build edges
-// FIXED: Reverse edges built in final pass (no overwrite)
+// ═══ Call Graph v0.3.3 ═══
+// FIXED: require() replaced with ESM import
+// FIXED: Errors no longer silently swallowed
+// FIXED: Multi-pass: index → imports → contracts → edges
 
 import { readFileSync, readdirSync, statSync } from "fs";
 import { join, relative, resolve, dirname } from "path";
-import { parseFile, detectLanguage } from "../core/ast-engine.js";
+import { parseFile, detectLanguage, extractContract } from "../core/ast-engine.js";
 import { createSymbolId, createFileRevision } from "../core/symbol-id.js";
 
 export class CallGraph {
@@ -15,13 +15,15 @@ export class CallGraph {
     this.edges = new Map();
     this.fileRevisions = new Map();
     this.testMap = new Map();
+    this.diagnostics = [];
   }
 
   scan(opts = {}) {
+    this.diagnostics = [];
     this._walkDir(this.root, opts.exclude || ["node_modules", ".git", "__pycache__", "dist", "build", ".cache"]);
     this._resolveAllImports();
     this._buildAllEdges();
-    return { files: this.nodes.size, symbols: this.edges.size };
+    return { files: this.nodes.size, symbols: this.edges.size, diagnostics: this.diagnostics };
   }
 
   callers(filePath, symbolName) {
@@ -49,22 +51,7 @@ export class CallGraph {
     return sym ? this.testMap.get(sym.id) || [] : [];
   }
 
-  touch(filePath) {
-    const fp = resolve(filePath);
-    const newRev = this._hashFile(fp);
-    const oldRev = this.fileRevisions.get(fp);
-    if (oldRev === newRev) return { changed: false };
-    const affected = [fp];
-    for (const [f, node] of this.nodes) {
-      if (node.imports.some(imp => imp.resolved === fp)) affected.push(f);
-    }
-    for (const f of affected) this.nodes.delete(f);
-    this.fileRevisions.set(fp, newRev);
-    return { changed: true, affected };
-  }
-
   toContextSlice(focusPaths, depth = 1) {
-    // focusPaths may include directories → resolve to actual files
     const files = [];
     for (const p of focusPaths) {
       const rp = resolve(p);
@@ -101,14 +88,10 @@ export class CallGraph {
   _indexFile(absPath) {
     try {
       const parsed = parseFile(absPath);
-      const { extractContract } = require("../core/ast-engine.js"); // dynamic import would be better but...
-      // Actually, use the already-imported parseFile which returns code
-      
       const symbols = parsed.symbols.map(sym => {
         const id = createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
         const body = sym.body || "";
-        // Build contract from body
-        const contract = this._buildContract(sym, body, parsed.language);
+        const contract = extractContract(sym, parsed.code, parsed.language);
         return { ...sym, id, file: absPath, contract };
       });
 
@@ -116,7 +99,7 @@ export class CallGraph {
       this.fileRevisions.set(absPath, fileRev);
 
       const imports = parsed.imports.map(imp => ({
-        specifier: imp.specifier, raw: imp.raw, resolved: null, // resolved in pass 2
+        specifier: imp.specifier, raw: imp.raw, resolved: null,
       }));
 
       this.nodes.set(absPath, { symbols, imports, language: parsed.language });
@@ -135,24 +118,9 @@ export class CallGraph {
           }
         }
       }
-    } catch {}
-  }
-
-  _buildContract(sym, body, language) {
-    const effects = [];
-    if (/\.(?:save|insert|update|delete|create|write|persist)\s*\(/i.test(body)) effects.push("database-write");
-    if (/\.(?:publish|send|post|put)\s*\(/.test(body)) effects.push("network-write");
-    if (/\.(?:fetch|get|request)\s*\(/.test(body)) effects.push("network-read");
-    if (/(?:spawn|exec|fork)\s*\(/.test(body)) effects.push("process-spawn");
-
-    const calls = new Set();
-    const callRe = /(\w+(?:\.\w+)*)\s*\(/g;
-    let m;
-    while ((m = callRe.exec(body)) !== null) {
-      if (m[1] !== sym.name) calls.add(m[1]);
+    } catch (error) {
+      this.diagnostics.push({ file: absPath, stage: "index", message: error.message });
     }
-
-    return { signature: sym.signature || "", effects, calls: [...calls], throws: [] };
   }
 
   _resolveAllImports() {
@@ -164,10 +132,10 @@ export class CallGraph {
   }
 
   _buildAllEdges() {
-    // First pass: build callees for each symbol
+    // Pass 1: callees
     for (const [file, node] of this.nodes) {
       for (const sym of node.symbols) {
-        if (!sym.contract?.calls) continue;
+        if (!sym.contract?.calls?.length) continue;
         const edge = { callers: new Set(), callees: new Set() };
         for (const calledName of sym.contract.calls) {
           const target = this._findSymbol(calledName, file, node);
@@ -176,7 +144,7 @@ export class CallGraph {
         this.edges.set(sym.id, edge);
       }
     }
-    // Second pass: build reverse callers (no overwrite)
+    // Pass 2: reverse callers
     for (const [symId, edge] of this.edges) {
       for (const calleeId of edge.callees) {
         const targetEdge = this.edges.get(calleeId);
@@ -186,10 +154,8 @@ export class CallGraph {
   }
 
   _findSymbol(name, currentFile, currentNode) {
-    // Same file
     const local = currentNode.symbols.find(s => s.name === name || s.qualifiedName === name || s.qualifiedName?.endsWith("." + name));
     if (local) return local;
-    // Imported files
     for (const imp of currentNode.imports) {
       if (!imp.resolved) continue;
       const imported = this.nodes.get(imp.resolved);
@@ -227,8 +193,6 @@ export class CallGraph {
     }
     for (const imp of node.imports) { if (imp.resolved) this._collectSlice(imp.resolved, depth - 1, visited, slice); }
   }
-
-  _hashFile(p) { try { return createFileRevision(readFileSync(p, "utf-8")); } catch { return null; } }
 
   _resolveRef(id) {
     for (const [, node] of this.nodes) {

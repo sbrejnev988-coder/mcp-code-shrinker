@@ -1,15 +1,26 @@
-// ═══ Patch Validator v0.3.2 ═══
-// FIXED: ESM imports (no require())
-// FIXED: node --check instead of new Function()
-// FIXED: Hash re-check: stored as result.originalHash
-// FIXED: ESLint exit 1 properly detected
-// FIXED: Path security: relative() check instead of startsWith
+// ═══ Patch Validator v0.3.3 ═══
+// FIXED: patchId traversal blocked (resolve + isInside)
+// FIXED: shell injection — spawnSync(args, shell:false)
+// FIXED: atomic write — fsync + renameSync
+// FIXED: isTS regex — /\.(?:ts|tsx)$/i
+// FIXED: symlink traversal — lstatSync, skip symlinks
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, cpSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, cpSync, readdirSync, statSync, lstatSync, renameSync, fdatasyncSync, openSync, closeSync } from "node:fs";
 import { join, resolve, relative, isAbsolute, dirname } from "node:path";
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createFileRevision } from "../core/symbol-id.js";
+
+function isInside(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function assertSafePatchId(id) {
+  if (id && (id.includes('..') || id.includes('/') || id.includes(String.fromCharCode(92)))) {
+    throw new Error("INVALID_PATCH_ID: " + id);
+  }
+}
 
 export class PatchValidator {
   constructor({ projectRoot = ".", sandboxBase = null } = {}) {
@@ -19,28 +30,34 @@ export class PatchValidator {
   }
 
   validate({ patchId, filePath, originalHash, edits }) {
+    assertSafePatchId(patchId);
     const absPath = resolve(filePath);
     const id = patchId || `patch_${randomUUID()}`;
     const result = { patchId: id, status: "pending", steps: [], started: Date.now() };
-    const sandboxDir = join(this.sandboxBase, id);
+    const sandboxDir = resolve(this.sandboxBase, id);
+
+    // Traversal guard
+    if (!isInside(resolve(this.sandboxBase), sandboxDir)) {
+      return this._fail(result, "SANDBOX_PATH_ESCAPE", { sandboxDir });
+    }
 
     try {
-      // Security: proper path containment check
+      // Path check
       if (!isInside(this.projectRoot, absPath)) {
         return this._fail(result, "PATH_OUTSIDE_ROOT", { path: absPath, root: this.projectRoot });
       }
       result.steps.push({ step: "path_check", status: "passed" });
 
-      // Hash check
+      // Hash check — store for re-check
       const realCode = readFileSync(absPath, "utf-8");
       const actualHash = createFileRevision(realCode);
-      result.originalHash = actualHash; // ← STORED for apply re-check
+      result.originalHash = actualHash;
       if (originalHash && originalHash !== actualHash) {
         return this._fail(result, "STALE_FILE", { expected: originalHash, actual: actualHash });
       }
       result.steps.push({ step: "hash_check", status: "passed" });
 
-      // Create isolated sandbox
+      // Create sandbox
       this._createSandbox(sandboxDir);
       const relPath = relative(this.projectRoot, absPath);
       const sandboxFile = join(sandboxDir, relPath);
@@ -55,23 +72,28 @@ export class PatchValidator {
       writeFileSync(sandboxFile, lines.join("\n"));
       result.steps.push({ step: "apply_edits", status: "passed" });
 
-      // Parse check: use node --check (handles ESM, import, export)
+      // Syntax check — spawnSync, no shell
       const parseOk = this._syntaxCheck(sandboxFile);
       if (!parseOk.passed) return this._fail(result, "PARSE_ERROR", parseOk);
       result.steps.push({ step: "parse", status: "passed" });
 
-      // Type check
-      const isTS = relPath.match(/\.\(ts\|tsx\)\$/); const typeResult = isTS ? this._runInSandbox(sandboxDir, relPath, "tsc", ["--noEmit", "--pretty", "false"]) : null;
-      if (typeResult && typeResult.failed) return this._fail(result, "TYPE_ERROR", typeResult);
-      result.steps.push({ step: "typecheck", status: typeResult ? "passed" : "skipped", reason: typeResult ? null : "tsc not available" });
+      // Type check (only .ts/.tsx)
+      const isTS = /\.(?:ts|tsx|mts|cts)$/i.test(relPath);
+      if (isTS) {
+        const typeResult = this._runInSandbox(sandboxDir, "tsc", ["--noEmit", "--pretty", "false", relPath]);
+        if (typeResult && typeResult.failed) return this._fail(result, "TYPE_ERROR", typeResult);
+        result.steps.push({ step: "typecheck", status: typeResult ? "passed" : "skipped" });
+      } else {
+        result.steps.push({ step: "typecheck", status: "skipped", reason: "not .ts" });
+      }
 
-      // Lint — properly handle exit 1 = lint errors
-      const lintResult = this._runInSandbox(sandboxDir, relPath, "eslint", ["--format", "compact"]);
+      // Lint
+      const lintResult = this._runInSandbox(sandboxDir, "eslint", ["--format", "compact", relPath]);
       if (lintResult) {
         if (lintResult.failed) return this._fail(result, "LINT_ERROR", lintResult);
         result.steps.push({ step: "lint", status: "passed" });
       } else {
-        result.steps.push({ step: "lint", status: "skipped", reason: "eslint not available" });
+        result.steps.push({ step: "lint", status: "skipped", reason: "eslint unavailable" });
       }
 
       // Tests
@@ -80,14 +102,13 @@ export class PatchValidator {
         if (testResult.failed > 0) return this._fail(result, "TEST_FAILURE", testResult);
         result.steps.push({ step: "tests", status: "passed", passed: testResult.passed, failed: testResult.failed });
       } else {
-        result.steps.push({ step: "tests", status: "skipped", reason: "no tests found" });
+        result.steps.push({ step: "tests", status: "skipped" });
       }
 
       result.status = "valid";
       result.sandboxDir = sandboxDir;
       result.summary = { steps: result.steps.length, passed: result.steps.filter(s => s.status === "passed").length, duration_ms: Date.now() - result.started };
       result.patchReady = true;
-
     } catch (e) {
       return this._fail(result, "INTERNAL_ERROR", { message: e.message });
     }
@@ -97,6 +118,7 @@ export class PatchValidator {
   }
 
   apply({ patchId, filePath }) {
+    assertSafePatchId(patchId);
     const validation = this.results.get(patchId);
     if (!validation || validation.status !== "valid") {
       return { status: "rejected", reason: "Patch not validated" };
@@ -107,7 +129,7 @@ export class PatchValidator {
       return { status: "rejected", reason: "PATH_OUTSIDE_ROOT" };
     }
 
-    // REAL hash re-check using stored originalHash
+    // REAL hash re-check
     const currentCode = readFileSync(absPath, "utf-8");
     const currentHash = createFileRevision(currentCode);
     if (validation.originalHash && currentHash !== validation.originalHash) {
@@ -117,18 +139,21 @@ export class PatchValidator {
     const relPath = relative(this.projectRoot, absPath);
     const sandboxFile = join(validation.sandboxDir, relPath);
     if (!existsSync(sandboxFile)) {
-      return { status: "rejected", reason: "Sandbox missing — re-validate" };
+      return { status: "rejected", reason: "Sandbox missing" };
     }
 
     const patchedCode = readFileSync(sandboxFile, "utf-8");
-    
-    // Atomic-ish write: temp → backup → rename
     const tmpPath = absPath + ".tmp." + patchId;
     const bakPath = absPath + ".bak." + patchId;
-    writeFileSync(tmpPath, patchedCode);
+
+    // Atomic write: preserve mode, fsync, rename
+    let mode = 0o644;
+    try { mode = statSync(absPath).mode; } catch {}
+    writeFileSync(tmpPath, patchedCode, { mode });
+    try { const fd = openSync(tmpPath, "r+"); fdatasyncSync(fd); closeSync(fd); } catch {}
     try { cpSync(absPath, bakPath); } catch {}
-    writeFileSync(absPath, patchedCode);
-    try { rmSync(tmpPath); } catch {}
+    try { renameSync(tmpPath, absPath); } catch { writeFileSync(absPath, patchedCode); }
+    try { rmSync(tmpPath, { force: true }); } catch {}
 
     const newHash = createFileRevision(patchedCode);
     this._cleanSandbox(patchId);
@@ -150,11 +175,11 @@ export class PatchValidator {
     try { entries = readdirSync(src); } catch { return; }
     for (const entry of entries) {
       if (skip.has(entry)) continue;
-      // Include dotfiles (.eslintrc, .babelrc, etc.) — they affect validation
       const srcPath = join(src, entry);
       const destPath = join(dest, entry);
       let st;
-      try { st = statSync(srcPath); } catch { continue; }
+      try { st = lstatSync(srcPath); } catch { continue; }
+      if (st.isSymbolicLink()) continue; // Skip symlinks
       if (st.isDirectory()) { mkdirSync(destPath, { recursive: true }); this._copyDir(srcPath, destPath, skip); }
       else if (st.isFile()) { try { cpSync(srcPath, destPath); } catch {} }
     }
@@ -162,44 +187,46 @@ export class PatchValidator {
 
   _syntaxCheck(filePath) {
     const ext = filePath.split(".").pop();
-    const commands = { js: ["node", "--check"], mjs: ["node", "--check"], ts: ["npx", "tsc", "--noEmit"], tsx: ["npx", "tsc", "--noEmit"] };
-    const cmd = commands[ext];
-    if (!cmd) return { passed: true, note: "no syntax checker for ." + ext };
-    const r = spawnSync(cmd[0], [...cmd.slice(1), filePath], { timeout: 15000, encoding: "utf-8" });
-    if (r.status !== 0) return { passed: false, error: r.stderr?.slice(0, 500) || r.stdout?.slice(0, 500) };
+    const map = { js: ["node", "--check"], mjs: ["node", "--check"] };
+    const cmd = map[ext];
+    if (!cmd) return { passed: true, note: "no syntax check for ." + ext };
+    const r = spawnSync(cmd[0], [...cmd.slice(1), filePath], { timeout: 15000, encoding: "utf-8", shell: false });
+    if (r.status !== 0) return { passed: false, error: (r.stderr || r.stdout || "").slice(0, 500) };
     return { passed: true };
   }
 
-  _runInSandbox(sandboxDir, relPath, cmd, args) {
+  _runInSandbox(sandboxDir, cmd, args) {
     try {
-      execSync([cmd, ...args, relPath].join(" "), { cwd: sandboxDir, timeout: 30000, encoding: "utf-8" });
-      return { failed: false };
-    } catch (e) {
-      const out = (e.stdout || e.stderr || "");
-      // tsc: errors = "error TS"
-      // eslint: exit 1 on lint errors
-      if (cmd === "eslint" && e.status === 1) {
+      const result = spawnSync(cmd, args, { cwd: sandboxDir, timeout: 30000, encoding: "utf-8", shell: false });
+      const out = (result.stdout || result.stderr || "");
+      if (result.status === 0) return { failed: false };
+      if (cmd === "eslint" && result.status === 1) {
         const errCount = (out.match(/error/g) || []).length;
         return { failed: true, errors: errCount, output: out.slice(0, 1000) };
       }
-      if (cmd === "tsc" && out.includes("error TS")) {
+      if (out.includes("error TS")) {
         return { failed: true, errors: out.split("\n").filter(l => l.includes("error")).length, output: out.slice(0, 1000) };
       }
-      return null; // Command unavailable
-    }
+      return null;
+    } catch { return null; }
   }
 
   _runTestsInSandbox(sandboxDir, relPath) {
-    const bases = [relPath.replace(/\.(js|ts|jsx|tsx)$/, ".test.$1"), relPath.replace(/\.(js|ts)$/, ".spec.$1"), relPath.replace(/^src\//, "test/"), relPath.replace(/^src\//, "__tests__/")];
+    const bases = [
+      relPath.replace(/\.(js|ts|jsx|tsx)$/, ".test.$1"),
+      relPath.replace(/\.(js|ts)$/, ".spec.$1"),
+      "test/" + relPath.replace(/^src\//, ""),
+      "__tests__/" + relPath.replace(/^src\//, ""),
+      relPath.replace(/^src\//, "test/").replace(/\.(js|ts)$/, ".test.$1"),
+    ];
     for (const tf of bases) {
       const tp = join(sandboxDir, tf);
       if (existsSync(tp)) {
         try {
-          const r = execSync(`node --test "${tf}"`, { cwd: sandboxDir, timeout: 60000, encoding: "utf-8" });
-          return { passed: 1, failed: 0, output: r.slice(0, 1500) };
-        } catch (e) {
-          return { passed: 0, failed: 1, output: (e.stdout || e.stderr || "").slice(0, 1500) };
-        }
+          const r = spawnSync(process.execPath, ["--test", tf], { cwd: sandboxDir, timeout: 60000, encoding: "utf-8", shell: false });
+          if (r.status === 0) return { passed: 1, failed: 0, output: r.stdout?.slice(0, 1500) };
+          return { passed: 0, failed: 1, output: (r.stderr || r.stdout || "").slice(0, 1500) };
+        } catch { return { passed: 0, failed: 1, output: "test spawn error" }; }
       }
     }
     return null;
@@ -219,9 +246,4 @@ export class PatchValidator {
   _cleanSandbox(patchId) { try { rmSync(join(this.sandboxBase, patchId), { recursive: true, force: true }); } catch {} }
 
   _fail(result, reason, details) { result.status = "invalid"; result.failure = { reason, ...details }; result.patchReady = false; this.results.set(result.patchId, result); return result; }
-}
-
-function isInside(root, candidate) {
-  const rel = relative(root, candidate);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }

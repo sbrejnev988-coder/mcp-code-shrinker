@@ -86,12 +86,15 @@ class RegexParser {
       }
 
       // Detect declarations
+      const CONTROL_WORDS = new Set(['if','for','while','switch','catch','with','do','else','try','finally','return','throw','new','typeof','instanceof','delete','void']);
       const patterns = this._getPatterns();
       for (const pat of patterns) {
         const m = trimmed.match(pat.regex);
         if (!m) continue;
 
         const name = m[1];
+        if (pat.kind === 'method' && CONTROL_WORDS.has(name)) continue;
+        if (CONTROL_WORDS.has(name) && pat.kind !== 'class') continue;
         const qualifiedName = scopeStack.length > 0
           ? `${scopeStack[scopeStack.length-1]}.${name}`
           : name;
@@ -105,9 +108,9 @@ class RegexParser {
 
         // Find opening { or :
         let openIdx = -1;
-        const rest = code.slice(matchPos);
-        const braceMatch = rest.match(/[{(:]/);
-        if (braceMatch) openIdx = matchPos + braceMatch.index;
+        const declarationStartByte = matchPos; const rest2 = code.slice(declarationStartByte);
+        const braceMatch = rest2.match(/[{:]/);
+        if (braceMatch) openIdx = declarationStartByte + braceMatch.index;
 
         let endByte = code.length - 1;
         let endLine = lines.length;
@@ -137,7 +140,7 @@ class RegexParser {
           name, qualifiedName, kind: pat.kind, signature: sig,
           startLine: i + 1, endLine,
           startByte: matchPos, endByte,
-          body: code.slice(matchPos, endByte + 1),
+          body: code.slice(lineStartPos + (line.indexOf(trimmed) >= 0 ? line.indexOf(trimmed) : 0), endByte + 1),
         });
 
         if (pat.kind === "class") scopeStack.push(qualifiedName);

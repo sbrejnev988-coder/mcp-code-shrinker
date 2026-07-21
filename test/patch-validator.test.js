@@ -18,7 +18,7 @@ describe("PatchValidator", () => {
 
   it("validates a correct patch", () => {
     const r = validator.validate({
-      patchId: "test_p1",
+      patchId: "patch_test1",
       filePath: testFile,
       edits: [{ operation: "replace_symbol", startLine: 1, endLine: 3, code: "export function add(a, b) {\n  return a + b + 1;\n}" }],
     });
@@ -28,7 +28,7 @@ describe("PatchValidator", () => {
 
   it("detects path outside root", () => {
     const r = validator.validate({
-      patchId: "evil",
+      patchId: "patch_evil",
       filePath: "/etc/hosts",
       edits: [{ operation: "replace_symbol", startLine: 1, endLine: 1, code: "" }],
     });
@@ -38,16 +38,18 @@ describe("PatchValidator", () => {
 
   it("detects stale file on re-apply", () => {
     const r1 = validator.validate({
-      patchId: "stale_test",
+      patchId: "patch_stale",
       filePath: testFile,
       edits: [{ operation: "replace_symbol", startLine: 1, endLine: 3, code: "export function add(a, b) {\n  return a * b;\n}" }],
     });
     assert.equal(r1.status, "valid");
     
+    // Restore original then modify
+    writeFileSync(testFile, "export function add(a, b) {\\n  return a + b;\\n}\\n");
     // Modify file between validate and apply
     writeFileSync(testFile, "export function add(a, b) {\n  return 0;\n}\n");
     
-    const r2 = validator.apply({ patchId: "stale_test", filePath: testFile });
+    const r2 = validator.apply({ patchId: "patch_stale", filePath: testFile });
     assert.equal(r2.status, "rejected");
     assert.match(r2.reason, /STALE_FILE/);
   });
@@ -58,7 +60,7 @@ describe("PatchValidator", () => {
     mkdirSync(evilDir, { recursive: true });
     try {
       const r = validator.validate({
-        patchId: "collide",
+        patchId: "patch_collide",
         filePath: join(evilDir, "x.js"),
         edits: [],
       });

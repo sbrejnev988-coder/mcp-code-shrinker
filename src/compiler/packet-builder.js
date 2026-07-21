@@ -28,7 +28,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
     const h = handles.register(sid, sym.qualifiedName, targetFile);
     contracts.push({
-      handle: h, id: sid, revision: srev, fileRevision: fileRev, kind: sym.kind,
+      handle: h, id: sid, revision: srev, fileRevision: fileRev, kind: sym.kind, name: sym.name, qualifiedName: sym.qualifiedName,
       signature: sym.signature, visibility: c.visibility,
       effects: c.effects, throws: c.throws,
       calls: c.calls.map(cn => handles.register(createSymbolId({ language: parsed.language, nodeType: "function", qualifiedName: cn, signature: "()" }), cn, targetFile)),
@@ -69,7 +69,8 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     }
     
     if (used + cost > alloc.total) {
-      packet.loss.removed.symbols++;
+      packet.omitted.push({ id: c.id, handle: c.handle || c.id, reason: 'token_budget', availableViews: ['contract'], estimatedTokens: cost });
+        packet.loss.removed.symbols++;
       packet.loss.removedSymbolIds.push(c.id);
       continue;
     }
