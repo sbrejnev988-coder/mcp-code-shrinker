@@ -3,7 +3,7 @@
 // FIXED: Errors no longer silently swallowed
 // FIXED: Multi-pass: index → imports → contracts → edges
 
-import { readFileSync, readdirSync, statSync } from "fs";
+import { readFileSync, readdirSync, statSync, lstatSync } from "fs";
 import { join, relative, resolve, dirname } from "path";
 import { parseFile, detectLanguage, extractContract } from "../core/ast-engine.js";
 import { createSymbolId, createFileRevision } from "../core/symbol-id.js";
@@ -74,7 +74,8 @@ export class CallGraph {
       if (exclude.some(e => entry === e)) continue;
       const full = join(dir, entry);
       let st;
-      try { st = statSync(full); } catch { continue; }
+      try { st = lstatSync(full); } catch { continue; }
+      if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) { this._walkDir(full, exclude); }
       else if (st.isFile()) {
         const lang = detectLanguage(full);
@@ -132,6 +133,14 @@ export class CallGraph {
   }
 
   _buildAllEdges() {
+    // Pre-initialize edges for ALL symbols (leaf functions too!)
+    for (const [file, node] of this.nodes) {
+      for (const sym of node.symbols) {
+        if (!this.edges.has(sym.id)) {
+          this.edges.set(sym.id, { callers: new Set(), callees: new Set() });
+        }
+      }
+    }
     // Pass 1: callees
     for (const [file, node] of this.nodes) {
       for (const sym of node.symbols) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ═══ Code Shrinker MCP Server v0.3.3 ═══
+// ═══ Code Shrinker MCP Server v0.3.4 ═══
 // Stabilization release — all P0 bugs fixed
 // FIXED: Full body extraction → symbol.source/symbolRevision correct
 // FIXED: require() removed, node --check for syntax
@@ -215,7 +215,7 @@ async function handlePatchPropose(args) {
     }
   }
   const patchId = `patch_${randomUUID().slice(0, 12)}`;
-  patches.set(patchId, { contextId: args.contextId, edits: args.edits });
+  const ref = { contextId: args.contextId, contextRevision: packet.revision, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
   return ok({ patchId, contextId: args.contextId, edits: args.edits.map(e => ({ ...e, status: "proposed" })), note: "Use patch.validate with this patchId next." });
 }
 
@@ -247,4 +247,4 @@ function estimateTokens(t) { return Math.ceil(String(t).length / 1.3); }
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("[code-shrinker v0.3.2] ready — all P0 bugs fixed");
+console.error("[code-shrinker v0.3.4] ready — all P0 bugs fixed");

@@ -63,11 +63,19 @@ export class PatchValidator {
       const sandboxFile = join(sandboxDir, relPath);
       result.steps.push({ step: "sandbox_create", status: "passed" });
 
-      // Apply edits
+      // Apply edits (bottom-up to preserve line numbers)
       let sandboxCode = readFileSync(sandboxFile, "utf-8");
       const lines = sandboxCode.split("\n");
-      for (const edit of edits) {
+      // Check for overlapping edits
+      const sorted = [...edits].sort((a, b) => (b.startLine || 0) - (a.startLine || 0));
+      for (const edit of sorted) {
         if (!this._applyEditToLines(lines, edit)) return this._fail(result, "EDIT_FAILED", { edit });
+      }
+      // Check for overlapping edits
+      for (let i = 0; i < sorted.length; i++) {
+        for (let j = i + 1; j < sorted.length; j++) {
+          if (overlaps(sorted[i], sorted[j])) return this._fail(result, "OVERLAPPING_EDITS", { a: sorted[i], b: sorted[j] });
+        }
       }
       writeFileSync(sandboxFile, lines.join("\n"));
       result.steps.push({ step: "apply_edits", status: "passed" });
@@ -105,6 +113,8 @@ export class PatchValidator {
         result.steps.push({ step: "tests", status: "skipped" });
       }
 
+      // Store validated hash for integrity check
+      result.validatedPatchedHash = createFileRevision(readFileSync(sandboxFile, "utf-8"));
       result.status = "valid";
       result.sandboxDir = sandboxDir;
       result.summary = { steps: result.steps.length, passed: result.steps.filter(s => s.status === "passed").length, duration_ms: Date.now() - result.started };
@@ -143,6 +153,11 @@ export class PatchValidator {
     }
 
     const patchedCode = readFileSync(sandboxFile, "utf-8");
+    // Check sandbox wasn't modified after validation
+    const currentSandboxHash = createFileRevision(patchedCode);
+    if (validation.validatedPatchedHash && currentSandboxHash !== validation.validatedPatchedHash) {
+      return { status: "rejected", reason: "SANDBOX_CHANGED_AFTER_VALIDATION" };
+    }
     const tmpPath = absPath + ".tmp." + patchId;
     const bakPath = absPath + ".bak." + patchId;
 
@@ -246,4 +261,9 @@ export class PatchValidator {
   _cleanSandbox(patchId) { try { rmSync(join(this.sandboxBase, patchId), { recursive: true, force: true }); } catch {} }
 
   _fail(result, reason, details) { result.status = "invalid"; result.failure = { reason, ...details }; result.patchReady = false; this.results.set(result.patchId, result); return result; }
+}
+
+function overlaps(a, b) {
+  if (!a.startLine || !a.endLine || !b.startLine || !b.endLine) return false;
+  return a.startLine <= b.endLine && b.startLine <= a.endLine;
 }

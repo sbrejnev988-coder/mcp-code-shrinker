@@ -1,4 +1,4 @@
-# mcp-code-shrinker v0.3.3
+# mcp-code-shrinker v0.3.4
 
 **Semantic Context Compiler** — stratified L0-L3 context with exact-source escalation.
 
