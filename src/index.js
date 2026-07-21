@@ -153,7 +153,7 @@ async function handleSymbolContext(args) {
 
 async function handleContextCreate(args) {
   const tf = await resolveInsideRoot(args.targetFile);
-  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: rootForFile(fp) });
+  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: rootForFile(tf) });
   if (callGraph && args.task?.target) {
     const callers = callGraph.callers(tf, args.task.target);
     const tests = callGraph.getTests(tf, args.task.target);
