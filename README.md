@@ -1,58 +1,85 @@
-# Code Shrinker MCP Server
+# mcp-code-shrinker v0.2.0
 
-Aggressive token-economy MCP server for AI coding: **-60-80% token reduction** in LLM prompts.
+**Semantic Context Compiler** — not a code compressor.
 
-Instead of sending full source code to the LLM, Code Shrinker provides **fingerprints** — compact structural signatures of files. The model requests only the symbols it actually needs via lazy loading.
-
-## Features
-
-| Tool | Description |
-|------|-------------|
-| `project_outline` | Full project structure as fingerprints (no code loaded) |
-| `file_fingerprint` | Per-file signatures: exports, imports, top-level symbols, hash |
-| `file_symbol` | Lazy-load a specific function/class by ID from fingerprint |
-| `code_generate` | Generate code from spec + dependency symbol IDs |
-| `code_review` | Review a diff against file fingerprint (no full code needed) |
-| `code_refactor` | Refactor a specific symbol — loads ONLY that symbol's body |
-| `context_compress` | Aggressively compress code/text: strip comments, create aliases |
-| `debug_analyze` | Analyze error output against fingerprints, produce diagnosis + patch |
-| `debug_fix` | Full auto-fix cycle: analyze → patch → test → retry (up to 3 iterations) |
-| `debug_trace` | Instrument a function with console.log, run with args, collect runtime data |
-| `exec_run` | Run shell command in sandbox, returns stdout/stderr/exit code |
-| `exec_test` | Run test suite by pattern, returns TAP report |
-| `proj_init` | Initialize project dependency graph |
-| `proj_deps` | Show file dependencies (in/out/all) |
-| `proj_affected` | Compute transitively affected files from changes |
-| `proj_scope` | Compact subgraph for task context |
-| `task_plan` | Decompose feature into isolated subtasks |
-| `task_spawn` | Spawn autonomous agent for a subtask |
-| `task_status` | Check subtask status |
-| `task_merge` | Merge parallel subtask results |
-| `test_gen` | Generate unit tests for a function by symbolId |
-
-## Plugins (language support)
-
-- **universal.js** — regex-based, works with any language
-- **javascript.js** — AST-aware via regex patterns
-- **typescript.js** — TS-specific: interfaces, generics, decorators
-- **python.js** — decorators, async, type hints, dataclasses
+Stratified semantic context with exact-source escalation. Achieves 60-80% token reduction **without quality loss** by compressing context *selection*, not selected code.
 
 ## Architecture
 
 ```
-┌─────────────┐    fingerprint     ┌──────────┐
-│   LLM       │ ◄──────────────── │ MCP      │
-│  (model)    │ ──── symbol req ──►│ Server   │
-└─────────────┘                   └────┬─────┘
-                                       │
-                          ┌────────────┼────────────┐
-                          │            │            │
-                     Plugin Mgr   Context Cache  Token Budget
-                          │
-              ┌───────────┼───────────┐
-              │           │           │
-          universal     js/ts        python
+Layer 0: Project Map         (5% tokens, always included)
+  └─ file tree, exports, languages, entry points
+  
+Layer 1: Semantic Contracts  (40% tokens, per relevant file)
+  └─ signatures, effects, throws, calls, properties, confidence
+  
+Layer 2: Exact Source        (40% tokens, only for symbols that matter)
+  └─ FULL original code — NO renaming, NO regex, NO formatting changes
+  
+Layer 3: Evidence            (15% tokens)
+  └─ tests, stack traces, diagnostics, runtime data
 ```
+
+## Key Principles
+
+1. **Compress selection, not code** — the model sees fewer symbols, but each in full fidelity
+2. **NEVER rename identifiers** in source code — aliases only for metadata references
+3. **NEVER truncate inside AST nodes** — remove whole symbols, not partial ones
+4. **Stable symbol IDs** — `symbolId` survives neighbor edits; `symbolRevision` changes on body edit
+5. **Loss manifest** — every packet honestly reports what was removed and retrievability
+
+## Tools
+
+| Tool | Layer | Description |
+|------|-------|-------------|
+| `project.map` | L0 | Project file tree, exports, entry points |
+| `file.contracts` | L1 | Semantic contracts for all symbols in a file |
+| `symbol.source` | L2 | EXACT source code (no modifications) |
+| `symbol.context` | L2+ | Callers, callees, tests, side effects |
+| `context.create` | L0-3 | Build complete context packet for a task |
+| `context.expand` | L0-3 | Expand packet with model-requested symbols |
+| `context.inspect` | — | Show loss manifest: what was removed, risk level |
+| `patch.propose` | — | Minimal edit operations (not full files) |
+| `patch.validate` | — | Parse → typecheck → lint → test |
+| `patch.apply` | — | Apply validated patch with hash check |
+
+## Symbol Identity
+
+```json
+{
+  "symbolId": "sym_a3f2c8e1b4d5",      // language + type + name + signature
+  "symbolRevision": "72ce19ba",          // AST subtree hash
+  "fileRevision": "998ae120"             // full file hash
+}
+```
+
+Changing a neighbor function → `symbolId` stays same. Renaming → new `symbolId`. Body edit → new `symbolRevision`.
+
+## Context Packet Structure
+
+```json
+{
+  "contextId": "ctx_m5k2a9",
+  "task": { "type": "bugfix", "description": "Fix duplicate event" },
+  "layers": { "project": true, "contracts": 9, "sources": 2, "evidence": 1 },
+  "loss": {
+    "removed": { "symbols": 143, "bodies": 5 },
+    "preserved": { "targetSource": true, "contracts": true, "tests": true },
+    "risk": "low"
+  },
+  "aliases": { "@S1": "src/publisher.ts#Publisher.publish" }
+}
+```
+
+## Modes
+
+| Mode | Target source | Contract bodies | When |
+|------|--------------|-----------------|------|
+| **safe** | exact | exact contracts | Production bugfixes |
+| **balanced** | exact | contracts, bodies compressed | General development |
+| **aggressive** | exact | contracts only | Exploration, planning |
+
+**In ALL modes, target symbol source is NEVER compressed.**
 
 ## Install
 
@@ -75,14 +102,14 @@ mcp_servers:
     connect_timeout: 30
 ```
 
-## Token Savings
+## Roadmap
 
-| Scenario | Without Shrinker | With Shrinker | Savings |
-|----------|-----------------|---------------|---------|
-| Multi-file project (50 files) | ~120K tokens | ~25K tokens | **79%** |
-| Single file review | ~8K tokens | ~1.5K tokens | **81%** |
-| Error debugging (10 files) | ~45K tokens | ~12K tokens | **73%** |
-| Code generation from deps | ~30K tokens | ~8K tokens | **73%** |
+| Version | Focus |
+|---------|-------|
+| 0.2.0 | Stable IDs, L0-L3, semantic contracts, NO aliasing in code |
+| 0.3.0 | Tree-sitter grammars, full call graph, test discovery |
+| 0.4.0 | Auto-pilot: worktree isolation, apply→verify→commit |
+| 0.5.0 | Benchmark suite: real repositories, real tokenizers, task success rate |
 
 ## License
 

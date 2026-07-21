@@ -1,12 +1,43 @@
 {
-  "name": "code-shrinker",
-  "version": "1.0.0",
+  "name": "mcp-code-shrinker",
+  "version": "0.2.0",
+  "description": "Semantic Context Compiler for AI coding: stratified context with exact-source escalation. -60-80% tokens without quality loss.",
   "type": "module",
   "main": "src/index.js",
   "bin": {
     "code-shrinker": "src/index.js"
   },
+  "files": [
+    "src/",
+    "plugins/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js",
+    "lint": "echo 'lint not configured'",
+    "benchmark": "node benchmark/run.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-shrinker",
+    "token-economy",
+    "context-compiler",
+    "semantic-compression",
+    "ai-coding",
+    "llm-context"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sbrejnev988-coder/mcp-code-shrinker.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
-  }
+  },
+  "license": "MIT"
 }
