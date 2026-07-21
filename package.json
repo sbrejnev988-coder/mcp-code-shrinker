@@ -15,7 +15,7 @@
   ],
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --check src/index.js && node --test test/*.test.js",
     "lint": "node --check src/**/*.js",
     "benchmark": "node benchmark/run.js"
   },

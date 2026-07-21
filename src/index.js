@@ -14,7 +14,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync, existsSync, realpathSync } from "fs";
-import { resolve, relative, isAbsolute, delimiter } from "path"; import { delimiter } from "path";
+const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+import { resolve, relative, isAbsolute, delimiter } from "node:path";
 import { randomUUID } from "crypto";
 import { buildContextPacket } from "./compiler/packet-builder.js";
 import { parseFile, extractContract } from "./core/ast-engine.js";
@@ -23,7 +24,7 @@ import { TokenBudget } from "./core/token-budget.js";
 import { CallGraph } from "./compiler/call-graph.js";
 import { PatchValidator } from "./compiler/patch-validator.js";
 
-const server = new Server({ name: "code-shrinker", version: "0.3.2" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "code-shrinker", version: PKG.version }, { capabilities: { tools: {} } });
 const budget = new TokenBudget();
 const sessions = new Map();
 const patches = new Map(); // patchId → { contextId, edits }
@@ -55,7 +56,7 @@ const toolDefs = [
   { name: "context.expand", title: "Expand Context", description: "FIXED: path validated, loads symbols into packet.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, requests: { type: "array", items: { type: "object", properties: { symbol: { type: "string" }, filePath: { type: "string" }, view: { type: "string", enum: ["source","contract"] }, reason: { type: "string" } }, required: ["symbol"] } } }, required: ["contextId","requests"] } },
   { name: "context.inspect", title: "Inspect Loss", description: "Loss manifest + quality.", inputSchema: { type: "object", properties: { contextId: { type: "string" } }, required: ["contextId"] } },
   { name: "patch.propose", title: "Propose Patch", description: "FIXED: patchId linked to validate/apply via randomUUID.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, edits: { type: "array" } }, required: ["contextId","edits"] } },
-  { name: "patch.validate", title: "Validate Patch", description: "FIXED: ESM syntax, ESLint detection, hash storage. Accepts patchId.", inputSchema: { type: "object", properties: { patchId: { type: "string" }, filePath: { type: "string" }, edits: { type: "array" }, originalHash: { type: "string" }, projectRoot: { type: "string" } }, required: ["filePath"] } },
+  { name: "patch.validate", title: "Validate Patch", description: "Validate proposed patch. Requires patchId from patch.propose. All state from server.", inputSchema: { type: "object", properties: { patchId: { type: "string" } }, required: ["patchId"], additionalProperties: false } },
   { name: "patch.apply", title: "Apply Patch", description: "FIXED: real hash re-check works now.", inputSchema: { type: "object", properties: { patchId: { type: "string" }, filePath: { type: "string" } }, required: ["patchId","filePath"] } },
 ];
 
@@ -215,22 +216,22 @@ async function handlePatchPropose(args) {
     }
   }
   const patchId = `patch_${randomUUID().slice(0, 12)}`;
-  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: tf, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
+  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: packet._targetFile, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
   return ok({ patchId, contextId: args.contextId, edits: args.edits.map(e => ({ ...e, status: "proposed" })), note: "Use patch.validate with this patchId next." });
 }
 
 async function handlePatchValidate(args) {
-  const fp = await resolveInsideRoot(args.filePath);
+  if (!args.patchId) return err('patchId required');
+  const proposed = patches.get(args.patchId);
+  if (!proposed) return err('UNKNOWN_PATCH_ID');
+  const ctx = sessions.get(proposed.contextId);
+  if (!ctx) return err('CONTEXT_EXPIRED');
+  if (ctx.revision !== proposed.contextRevision) return err('STALE_CONTEXT');
+  if (createFileRevision(JSON.stringify(proposed.edits)) !== proposed.editsHash) return err('PATCH_TAMPERED');
+  const filePath = await resolveInsideRoot(proposed.filePath);
   if (!validator) validator = new PatchValidator({ projectRoot: resolve(".") });
-  // Use provided patchId or load edits from patches map
-  let patchId = args.patchId || `patch_${randomUUID().slice(0, 12)}`;
-  let edits = args.edits;
-  if (!edits && patches.has(args.patchId)) {
-    edits = patches.get(args.patchId).edits;
-  }
-  if (!edits) return err("No edits provided — pass edits array or valid patchId");
-  const hash = args.originalHash || (existsSync(fp) ? createFileRevision(readFileSync(fp, "utf-8")) : null);
-  const result = validator.validate({ patchId, filePath: fp, originalHash: hash, edits });
+  const fileHash = existsSync(filePath) ? createFileRevision(readFileSync(filePath, "utf-8")) : null;
+  const result = validator.validate({ patchId: args.patchId, filePath, originalHash: fileHash, edits: proposed.edits });
   return ok(result);
 }
 
@@ -243,19 +244,9 @@ async function handlePatchApply(args) {
 
 function ok(d) { return { content: [{ type: "text", text: JSON.stringify(d, null, 2) }], structuredContent: d, isError: false }; }
 function err(m) { return { content: [{ type: "text", text: m }], isError: true }; }
-
-// Unified symbol identity — same ID across all tools
-function symId(root, filePath, parsed, sym) {
-  return createSymbolId({
-    projectRelativePath: relative(root || '.', filePath),
-    language: parsed.language,
-    nodeType: sym.kind,
-    qualifiedName: sym.qualifiedName,
-    signature: sym.signature,
-  });
-}
+function symId(root, filePath, parsed, sym) { return createSymbolId({ projectRelativePath: relative(root || '.', filePath), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }); }
 function estimateTokens(t) { return Math.ceil(String(t).length / 1.3); }
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("[code-shrinker v' + VERSION + '] ready — strict chain — all P0 bugs fixed");
+console.error(`[code-shrinker v${PKG.version}] ready`);
