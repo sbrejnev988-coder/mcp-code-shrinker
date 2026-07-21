@@ -1,5 +1,5 @@
-// ═══ Semantic Context Packet Builder v2.0 ═══
-import { createSymbolId, createSymbolRevision, createFileRevision, SessionHandleRegistry } from "../core/symbol-id.js";
+// ═══ Semantic Context Packet Builder v0.3.1 ═══
+import { createSymbolId, createSymbolRevisionFromSource, createFileRevision, SessionHandleRegistry } from "../core/symbol-id.js";
 import { parseFile, extractContract } from "../core/ast-engine.js";
 import { rankCandidates } from "./ranking.js";
 
@@ -9,73 +9,145 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   const handles = new SessionHandleRegistry();
 
   const packet = {
-    contextId: `ctx_${Date.now().toString(36)}`,
-    revision: 1, task,
+    contextId: `ctx_${Date.now().toString(36)}`, revision: 1, task,
     layers: { project: true, contracts: 0, sources: 0, evidence: 0 },
     tokens: 0, risk: "low", handles, aliases: {},
-    loss: { removed: { symbols: 0, comments: 0, bodies: 0, files: 0 }, preserved: { targetSource: false, contracts: false, errorPaths: false, tests: false }, risk: "low" },
-    omitted: [],
+    loss: { removed: { symbols: 0, comments: 0, bodies: 0, files: 0 }, preserved: { targetSource: false, contracts: false, errorPaths: false, tests: false }, risk: "low", removedSymbolIds: [] },
+    omitted: [], qualitySatisfied: true, estimatedQuality: 1.0,
     packet: { project: { project: projectRoot, language: parsed.language, modules: [] }, contracts: [], sources: [], evidence: [] },
   };
 
-  // ── Layer 0: Project Map ──
+  // ── Layer 0 ──
   packet.tokens += estimateJsons(JSON.stringify(packet.packet.project));
 
-  // ── Layer 1: Semantic Contracts ──
+  // ── Layer 1: Build all contracts ──
   const contracts = [];
   for (const sym of parsed.symbols) {
     const sid = createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
-    const srev = createSymbolRevision(sym.signature + sym.qualifiedName);
-    const h = handles.register(sid, sym.qualifiedName, targetFile);
     const c = extractContract(sym, parsed.code, parsed.language);
-    const needsSrc = shouldEscalate(sym, c, task, evidence);
-
-    contracts.push({ handle: h, id: sid, revision: srev, fileRevision: fileRev, kind: sym.kind, signature: sym.signature, visibility: c.visibility, effects: c.effects, throws: c.throws, calls: c.calls.map(cn => handles.register(createSymbolId({ language: parsed.language, nodeType: "function", qualifiedName: cn, signature: "()" }), cn, targetFile)), properties: c.properties, confidence: c.confidence, needsSource: needsSrc, range: [sym.startLine || 1, sym.endLine || sym.startLine || 1] });
+    const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
+    const h = handles.register(sid, sym.qualifiedName, targetFile);
+    contracts.push({
+      handle: h, id: sid, revision: srev, fileRevision: fileRev, kind: sym.kind,
+      signature: sym.signature, visibility: c.visibility,
+      effects: c.effects, throws: c.throws,
+      calls: c.calls.map(cn => handles.register(createSymbolId({ language: parsed.language, nodeType: "function", qualifiedName: cn, signature: "()" }), cn, targetFile)),
+      properties: c.properties, confidence: c.confidence,
+      needsSource: shouldEscalate(sym, c, task, evidence),
+      risk: assessRisk(sym, c),
+      range: [sym.startLine || 1, sym.endLine || sym.startLine || 1],
+      body: c.body, startLine: c.startLine, endLine: c.endLine,
+    });
     packet.layers.contracts++;
   }
 
+  // ── Rank & select ──
   const ranked = rankCandidates(contracts, task);
   const alloc = allocate(tokenBudget, mode);
   let used = packet.tokens;
+  const selectedIds = new Set();
 
-  const selContracts = [];
+  // Target ALWAYS included at Layer 2
+  const targetContract = contracts.find(c => 
+    c.qualifiedName?.includes(task.target) || c.name?.includes(task.target) || c.handle?.includes(task.target));
+  if (targetContract) {
+    selectedIds.add(targetContract.id);
+    const st = estimateJsons(JSON.stringify({ handle: targetContract.handle, id: targetContract.id, revision: targetContract.revision, source: targetContract.body }));
+    used += Math.min(st, alloc.sources);
+  }
+
   for (const r of ranked) {
-    const ct = estimateJsons(JSON.stringify(r.item));
-    if (used + ct > alloc.contracts) { packet.loss.removed.symbols++; continue; }
-    selContracts.push(r.item); used += ct;
+    const c = r.item;
+    if (selectedIds.has(c.id)) continue;
+    
+    // FIXED: aggressive mode includes FEWER sources, not more
+    const includeSource = c.id === targetContract?.id || c.needsSource || (mode === "safe" && c.risk >= 2);
+    
+    let cost = estimateJsons(JSON.stringify({ ...c, body: undefined }));
+    if (includeSource && c.body) {
+      cost += estimateJsons(c.body);
+    }
+    
+    if (used + cost > alloc.total) {
+      packet.loss.removed.symbols++;
+      packet.loss.removedSymbolIds.push(c.id);
+      continue;
+    }
+    
+    selectedIds.add(c.id);
+    used += cost;
   }
-  packet.packet.contracts = selContracts;
-  packet.loss.removed.symbols += contracts.length - selContracts.length;
 
-  // ── Layer 2: Exact Source (NO ALIASING!) ──
+  // ── Build selected contracts & sources ──
+  const selContracts = [];
   const sources = [];
-  for (const c of selContracts) {
-    if (!c.needsSource && mode !== "aggressive") continue;
-    const lines = parsed.code.split("\n");
-    const body = lines.slice(c.range[0] - 1, c.range[1]).join("\n");
-    const st = estimateJsons(body);
-    if (used + st > alloc.sources + alloc.contracts) { packet.omitted.push({ handle: c.handle, reason: "budget", retrievable: true }); packet.loss.removed.bodies++; continue; }
-    sources.push({ handle: c.handle, id: c.id, expectedRevision: c.revision, language: parsed.language, source: body, related: { callers: [], tests: [] } });
-    used += st; packet.layers.sources++; packet.loss.preserved.targetSource = true;
+  const removedIds = [];
+
+  for (const c of contracts) {
+    if (!selectedIds.has(c.id)) {
+      removedIds.push(c.id);
+      continue;
+    }
+    
+    const cc = { ...c, body: undefined, startLine: undefined, endLine: undefined };
+    delete cc.body; delete cc.startLine; delete cc.endLine;
+    selContracts.push(cc);
+
+    // FIXED: aggressive mode logic — include source only for high-value symbols
+    const includeSource = c.id === targetContract?.id || c.needsSource || (mode === "safe" && c.risk >= 2);
+    
+    if (includeSource && c.body) {
+      sources.push({
+        handle: c.handle, id: c.id, expectedRevision: c.revision,
+        language: parsed.language, source: c.body,
+        related: { callers: [], tests: [] },
+      });
+      packet.layers.sources++;
+      packet.loss.preserved.targetSource = true;
+    }
   }
+
+  // FIXED: loss manifest — count once, not double
+  packet.loss.removed.symbols = removedIds.length;
+  packet.loss.removedSymbolIds = removedIds;
+
+  packet.packet.contracts = selContracts;
   packet.packet.sources = sources;
 
-  // ── Layer 3: Evidence ──
+  // ── Layer 3: Evidence (FIXED: include diagnostics) ──
   if (evidence.tests) { packet.packet.evidence.push({ type: "tests", data: evidence.tests }); packet.layers.evidence++; packet.loss.preserved.tests = true; }
   if (evidence.stackTrace) { packet.packet.evidence.push({ type: "stackTrace", data: evidence.stackTrace }); packet.layers.evidence++; packet.loss.preserved.errorPaths = true; }
-  packet.tokens = used + estimateJsons(JSON.stringify(packet.packet.evidence));
+  if (evidence.diagnostics) { packet.packet.evidence.push({ type: "diagnostics", data: evidence.diagnostics }); packet.layers.evidence++; }
 
-  packet.loss.preserved.contracts = selContracts.length > 0;
+  packet.tokens = used + estimateJsons(JSON.stringify(packet.packet.evidence));
   packet.aliases = handles.toAliasMap();
-  if (packet.loss.removed.bodies > packet.layers.contracts * 0.3) packet.loss.risk = "medium";
-  if (!packet.loss.preserved.targetSource && task.type === "bugfix") packet.loss.risk = "high";
-  packet.risk = packet.loss.risk;
+
+  // ── FIXED: qualityFloor actually applied ──
+  const hasTargetSource = sources.length > 0;
+  const hasContracts = selContracts.length > 0;
+  const hasTests = !!evidence.tests;
+  let estQuality = 0.5;
+  if (hasTargetSource) estQuality += 0.15;
+  if (hasContracts) estQuality += 0.2;
+  if (hasTests) estQuality += 0.15;
+  if (packet.loss.removed.symbols < contracts.length * 0.3) estQuality = Math.min(1, estQuality + 0.1);
+  
+  packet.estimatedQuality = Math.round(estQuality * 100) / 100;
+  packet.qualitySatisfied = packet.estimatedQuality >= qualityFloor;
+
+  // ── Risk calculation ──
+  if (!packet.qualitySatisfied) packet.risk = "high";
+  else if (packet.loss.removed.bodies > 0 && !hasTargetSource) packet.risk = "high";
+  else if (packet.loss.removed.bodies > packet.layers.contracts * 0.3) packet.risk = "medium";
+  else packet.risk = "low";
+  
+  packet.loss.risk = packet.risk;
 
   return packet;
 }
 
 function shouldEscalate(sym, contract, task, evidence) {
-  if (task.target && sym.qualifiedName?.includes(task.target)) return true;
+  if (task.target && (sym.qualifiedName?.includes(task.target) || sym.name?.includes(task.target))) return true;
   if (evidence.stackTrace && evidence.stackTrace.includes(sym.name)) return true;
   if (evidence.tests && evidence.tests.includes(sym.name)) return true;
   if (contract.confidence?.effects < 0.5 || contract.confidence?.idempotent < 0.4) return true;
@@ -84,8 +156,17 @@ function shouldEscalate(sym, contract, task, evidence) {
   return false;
 }
 
+function assessRisk(sym, contract) {
+  let risk = 0;
+  if (sym.name?.match(/auth|perm|acl|role|crypt|token|secret|password|hash|payment|transaction|migrate/i)) risk += 2;
+  if (contract.properties?.transactional || contract.properties?.usesLocking) risk += 2;
+  if (contract.effects?.length > 2) risk += 1;
+  if (contract.throws?.length > 0) risk += 1;
+  return risk;
+}
+
 function allocate(total, mode) {
-  const m = { safe: [0.05, 0.40, 0.40], balanced: [0.05, 0.45, 0.35], aggressive: [0.03, 0.55, 0.30] }[mode] || [0.05, 0.45, 0.35];
+  const m = { safe: [0.05, 0.40, 0.45], balanced: [0.05, 0.45, 0.40], aggressive: [0.03, 0.55, 0.35] }[mode] || [0.05, 0.45, 0.40];
   return { project: total * m[0] | 0, contracts: total * m[1] | 0, sources: total * m[2] | 0, total };
 }
 

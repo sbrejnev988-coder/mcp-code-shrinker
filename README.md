@@ -1,66 +1,53 @@
-# mcp-code-shrinker v0.3.0
+# mcp-code-shrinker v0.3.1
 
-**Semantic Context Compiler** — stratifies context into L0-L3 layers with exact-source escalation. Achieves 60-80% token reduction by compressing context **selection**, not selected code.
+**Semantic Context Compiler** — stratified L0-L3 context with exact-source escalation.
 
-## What's New in v0.3
-
-- **Cross-file call graph** — `project.scan` builds full dependency graph with import resolution
-- **Real patch validation** — hash check → sandbox → parse → typecheck → lint → affected tests
-- **Callers/callees/tests** — `symbol.context` returns actual call-graph data
-- **Benchmark suite** — measures token savings against real codebases
-- **AST-atomic removal** — removes whole symbols, never truncates mid-node
+| Status | Feature |
+|--------|---------|
+| ✅ Implemented | L0 Project Map, L1 Contracts, L2 Exact Source, L3 Evidence |
+| ✅ Implemented | Stable symbol IDs (survive neighbor edits) |
+| ✅ Implemented | Symbol revision tracking (body changes → new revision) |
+| ✅ Implemented | Context packets with ranking + quality check |
+| ✅ Implemented | Patch workflow: propose → validate (sandbox) → apply |
+| ✅ Implemented | Path security (MCP roots) |
+| ✅ Implemented | Loss manifest + confidence scores |
+| 🔨 Experimental | Cross-file call graph (relative imports; package imports planned) |
+| 🔨 Experimental | Patch sandbox with project copy (node_modules skipped) |
+| 🔨 Experimental | TypeScript typecheck integration (tsc must be installed) |
+| 📋 Planned | tree-sitter grammars (regex parser used currently) |
+| 📋 Planned | Quality benchmark suite |
+| 📋 Planned | Git worktree isolation for patches |
 
 ## Architecture
 
 ```
 Layer 0: Project Map         (5%)
-Layer 1: Semantic Contracts  (40%)  signatures, effects, throws, calls, confidence
+Layer 1: Semantic Contracts  (40%)  signatures, effects, throws, confidence
 Layer 2: Exact Source        (40%)  NO renaming, NO regex, NO format changes
 Layer 3: Evidence            (15%)  tests, stack traces, diagnostics
 ```
 
-## Tools (12)
+## Tools (11)
 
-| Tool | Description |
-|------|-------------|
-| `project.scan` | Build cross-file call graph + test index |
-| `project.map` | L0: file tree, exports, entry points |
-| `file.contracts` | L1: all symbol contracts in a file |
-| `symbol.source` | L2: EXACT source — never modified |
-| `symbol.context` | Callers, callees, tests (needs scan) |
-| `context.create` | Build L0-L3 packet for a task |
-| `context.expand` | Model requests missing context |
-| `context.inspect` | Loss manifest: removed, risk, retrievable |
-| `patch.propose` | Minimal edit operations |
-| `patch.validate` | Parse → typecheck → lint → test |
-| `patch.apply` | Apply validated patch with hash check |
+| Tool | Status | Description |
+|------|--------|-------------|
+| `project.scan` | 🔨 Exp | Build cross-file call graph |
+| `project.map` | ✅ | L0: file tree + exports |
+| `file.contracts` | ✅ | L1: all symbol contracts |
+| `symbol.source` | ✅ | L2: EXACT source (never modified) |
+| `symbol.context` | 🔨 Exp | Callers/callees/tests from graph |
+| `context.create` | ✅ | Build L0-L3 packet |
+| `context.expand` | ✅ | Model requests missing symbols |
+| `context.inspect` | ✅ | Loss manifest + quality check |
+| `patch.propose` | ✅ | Edit operations |
+| `patch.validate` | ✅ | Sandbox: parse→typecheck→lint→test |
+| `patch.apply` | ✅ | Apply with hash re-check + .bak |
 
-## Quick Start
+## Install
 
 ```bash
 git clone https://github.com/sbrejnev988-coder/mcp-code-shrinker.git
-cd mcp-code-shrinker && npm install
-```
-
-### Hermes config
-```yaml
-mcp_servers:
-  code-shrinker:
-    enabled: true
-    command: node
-    args: [path/to/src/index.js]
-    timeout: 120
-```
-
-### Typical workflow
-```
-1. project.scan          → build call graph
-2. context.create        → build packet for task
-3. [LLM analyzes packet]
-4. context.expand        → model requests more
-5. [LLM proposes edits]
-6. patch.validate        → verify in sandbox
-7. patch.apply           → commit to file
+cd mcp-code-shrinker && npm install && npm test
 ```
 
 ## License

@@ -1,12 +1,7 @@
-// ═══ Stable Symbol Identity v2.0 ═══
-// symbolId    = hash(language + nodeType + qualifiedName + normalizedSignature)
-// symbolRevision = hash(normalizedAstSubtree)
-// fileRevision   = hash(fileContent)
-//
-// Changing a NEIGHBOR symbol → symbolId stays same, symbolRevision unchanged
-// Changing a symbol body  → symbolId stays same, symbolRevision changes
-// Renaming/change sig     → new symbolId
-// Any file change         → fileRevision changes
+// ═══ Stable Symbol Identity v2.1 ═══
+// symbolId       = hash(language + nodeType + qualifiedName + normalizedSignature)
+// symbolRevision = hash(full normalized AST subtree) ← FIXED: now tracks body changes
+// fileRevision   = hash(full file content)
 
 import { createHash } from "crypto";
 
@@ -15,35 +10,46 @@ const HASH_LEN = 12;
 /** Normalize signature: strip whitespace, sort generic params */
 function normalizeSignature(sig) {
   if (!sig) return "";
-  return sig
-    .replace(/\s+/g, " ")
-    .replace(/async\s+/g, "")
-    .trim();
+  return sig.replace(/\s+/g, " ").replace(/async\s+/g, "").trim();
+}
+
+/** Normalize AST subtree for revision hashing */
+function normalizeSubtree(node) {
+  if (!node) return "";
+  // Recursively normalize: type + name + normalized children
+  const parts = [node.kind || "unknown", node.name || "", node.qualifiedName || ""];
+  if (node.signature) parts.push(normalizeSignature(node.signature));
+  if (node.children) {
+    for (const child of node.children) {
+      parts.push(normalizeSubtree(child));
+    }
+  }
+  return parts.join("|");
 }
 
 /**
- * @param {object} opts
- * @param {string} opts.language - js, ts, python, etc.
- * @param {string} opts.nodeType - FunctionDeclaration, ClassDef, MethodDefinition, etc.
- * @param {string} opts.qualifiedName - module.Class.method or module.function
- * @param {string} opts.signature - normalized function signature
- * @param {number} [opts.declarationOrdinal] - for overloaded functions
+ * Create stable symbol identity (survives neighbor edits)
  */
 export function createSymbolId({ language, nodeType, qualifiedName, signature, declarationOrdinal = 0 }) {
-  const normalizedSig = normalizeSignature(signature);
-  const key = [
-    language,
-    nodeType,
-    qualifiedName,
-    normalizedSig,
-    declarationOrdinal > 0 ? `#${declarationOrdinal}` : "",
-  ].join("|");
+  const key = [language, nodeType, qualifiedName, normalizeSignature(signature), declarationOrdinal > 0 ? `#${declarationOrdinal}` : ""].join("|");
   return `sym_${shaShort(key)}`;
 }
 
-/** Hash of normalized AST subtree */
+/**
+ * Create revision from FULL normalized AST subtree
+ * Changing body → new revision. Changing signature → new symbolId.
+ */
 export function createSymbolRevision(normalizedAstSubtree) {
-  return shaShort(normalizedAstSubtree);
+  if (!normalizedAstSubtree) return "000000000000";
+  return shaShort(String(normalizedAstSubtree));
+}
+
+/**
+ * Create revision from raw source body (fallback when AST unavailable)
+ */
+export function createSymbolRevisionFromSource(sourceBody, signature) {
+  // Hash the EXACT body + signature — any change anywhere triggers new revision
+  return shaShort(signature + "::" + sourceBody);
 }
 
 /** Hash of full file content */
@@ -51,7 +57,7 @@ export function createFileRevision(fileContent) {
   return shaShort(fileContent);
 }
 
-/** Hash of project-level state (git rev, file tree) */
+/** Hash of project-level state */
 export function createProjectRevision(input) {
   return shaShort(typeof input === "string" ? input : JSON.stringify(input));
 }
@@ -60,71 +66,41 @@ function shaShort(input) {
   return createHash("sha256").update(input).digest("hex").slice(0, HASH_LEN);
 }
 
+/** Validate context freshness */
+export function validateContext(expected, actual) {
+  if (expected.fileRevision && expected.fileRevision !== actual.fileRevision) {
+    return { valid: false, error: "STALE_FILE", expected: expected.fileRevision, actual: actual.fileRevision };
+  }
+  if (expected.symbolRevision && expected.symbolRevision !== actual.symbolRevision) {
+    return { valid: false, error: "STALE_SYMBOL", symbolId: expected.symbolId, expected: expected.symbolRevision, actual: actual.symbolRevision };
+  }
+  return { valid: true };
+}
+
 /**
- * Parse a session handle like "@Publisher.publish" or "@S3"
- * Session handles are ephemeral, mapped to stable symbolIds
+ * Session handle registry for metadata aliases (NEVER used in source code)
  */
 export class SessionHandleRegistry {
-  constructor() {
-    this._handles = new Map(); // handle → { symbolId, qualifiedName, file }
-    this._reverse = new Map(); // symbolId → handle
-    this._counter = 0;
-  }
+  constructor() { this._handles = new Map(); this._reverse = new Map(); this._counter = 0; }
 
-  /** Register or retrieve a handle */
   register(symbolId, qualifiedName, file) {
     const existing = this._reverse.get(symbolId);
     if (existing) return existing;
-
-    // Try to create a readable handle
     const shortName = qualifiedName.split(".").pop() || qualifiedName;
     let handle = `@${shortName}`;
-    
-    // If taken, add suffix
-    if (this._handles.has(handle)) {
-      handle = `@S${++this._counter}`;
-    }
-
+    if (this._handles.has(handle)) handle = `@S${++this._counter}`;
     this._handles.set(handle, { symbolId, qualifiedName, file });
     this._reverse.set(symbolId, handle);
     return handle;
   }
 
-  resolve(handle) {
-    return this._handles.get(handle) || null;
-  }
+  resolve(handle) { return this._handles.get(handle) || null; }
 
-  /** Export for context packet */
   toAliasMap() {
     const map = {};
-    for (const [handle, info] of this._handles) {
-      map[handle] = `${info.file}#${info.qualifiedName}`;
-    }
+    for (const [h, info] of this._handles) map[h] = `${info.file}#${info.qualifiedName}`;
     return map;
   }
 }
 
-/**
- * Validate context freshness
- * @returns {{ valid: boolean, error?: string }}
- */
-export function validateContext(expected, actual) {
-  if (expected.fileRevision && expected.fileRevision !== actual.fileRevision) {
-    return {
-      valid: false,
-      error: "STALE_FILE",
-      expected: expected.fileRevision,
-      actual: actual.fileRevision,
-    };
-  }
-  if (expected.symbolRevision && expected.symbolRevision !== actual.symbolRevision) {
-    return {
-      valid: false,
-      error: "STALE_SYMBOL",
-      symbolId: expected.symbolId,
-      expected: expected.symbolRevision,
-      actual: actual.symbolRevision,
-    };
-  }
-  return { valid: true };
-}
+export { normalizeSignature, normalizeSubtree };
