@@ -57,7 +57,7 @@ const toolDefs = [
   { name: "context.inspect", title: "Inspect Loss", description: "Loss manifest + quality.", inputSchema: { type: "object", properties: { contextId: { type: "string" } }, required: ["contextId"] } },
   { name: "patch.propose", title: "Propose Patch", description: "FIXED: patchId linked to validate/apply via randomUUID.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, edits: { type: "array" } }, required: ["contextId","edits"] } },
   { name: "patch.validate", title: "Validate Patch", description: "Validate proposed patch. Requires patchId from patch.propose. All state from server.", inputSchema: { type: "object", properties: { patchId: { type: "string" } }, required: ["patchId"], additionalProperties: false } },
-  { name: "patch.apply", title: "Apply Patch", description: "FIXED: real hash re-check works now.", inputSchema: { type: "object", properties: { patchId: { type: "string" }, filePath: { type: "string" } }, required: ["patchId","filePath"] } },
+  { name: "patch.apply", title: "Apply Patch", description: "FIXED: real hash re-check works now.", inputSchema: { type: "object", properties: { patchId: { type: "string" } }, required: ["patchId"], additionalProperties: false } },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefs.map(t => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema, annotations: { readOnlyHint: !t.name.startsWith("patch.a"), destructiveHint: t.name === "patch.apply" } })) }));
@@ -179,12 +179,12 @@ async function handleContextExpand(args) {
       const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
       const h = packet.handles.register(sid, sym.qualifiedName, fp);
       if (!packet.packet.contracts.find(x => x.id === sid)) {
-        packet.packet.contracts.push({ handle: h, id: sid, revision: srev, kind: sym.kind, signature: c.signature, effects: c.effects, throws: c.throws, properties: c.properties, confidence: c.confidence, range: [sym.startLine, sym.endLine] });
+        packet.packet.contracts.push({ handle: h, id: sid, revision: srev, file: fp, kind: sym.kind, signature: c.signature, effects: c.effects, throws: c.throws, properties: c.properties, confidence: c.confidence, range: [sym.startLine, sym.endLine] });
         added.contracts.push({ handle: h, symbol: req.symbol, status: "loaded" });
         packet.layers.contracts++;
       }
       if (req.view === "source" && c.body && !packet.packet.sources.find(x => x.id === sid)) {
-        packet.packet.sources.push({ handle: h, id: sid, expectedRevision: srev, language: parsed.language, source: c.body });
+        packet.packet.sources.push({ handle: h, id: sid, expectedRevision: srev, file: fp, language: parsed.language, source: c.body });
         added.sources.push({ handle: h, symbol: req.symbol, status: "loaded", tokens: estimateTokens(c.body) });
         added.tokensAdded += estimateTokens(c.body);
         packet.layers.sources++;
@@ -245,14 +245,15 @@ async function handlePatchValidate(args) {
 }
 
 async function handlePatchApply(args) {
-  const vRoot = CONFIGURED_ROOTS[0] || resolve('.');
+  if (!args.patchId) return err('patchId required');
+  const proposed = patches.get(args.patchId);
+  if (!proposed) return err('UNKNOWN_PATCH_ID');
+  const fp = await resolveInsideRoot(proposed.filePath);
+  const vRoot = CONFIGURED_ROOTS.find(r => isInside(r, fp)) || CONFIGURED_ROOTS[0] || resolve('.');
   let vtor = validators.get(vRoot);
   if (!vtor) { vtor = new PatchValidator({ projectRoot: vRoot }); validators.set(vRoot, vtor); }
-  if (!args.patchId) return err('patchId required');
   const validation = vtor.results.get(args.patchId);
   if (!validation) return err('Validation not found — run patch.validate first');
-  const proposed = patches.get(args.patchId);
-  const fp = proposed?.filePath ? await resolveInsideRoot(proposed.filePath) : resolve('.');
   const result = vtor.apply({ patchId: args.patchId, filePath: fp });
   return ok(result);
 }
