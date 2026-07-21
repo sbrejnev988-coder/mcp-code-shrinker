@@ -1,0 +1,116 @@
+import { describe, it, before, after } from "node:test";
+import { strict as assert } from "node:assert";
+import { writeFileSync, mkdirSync, rmSync, readFileSync } from "fs";
+import { join, resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+import { spawn } from "child_process";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+function rpcId() { return Math.random().toString(36).slice(2); }
+
+async function rpcCall(server, method, params) {
+  const id = rpcId();
+  const req = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+  server.stdin.write(req);
+  return new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error("timeout: " + method)), 15000);
+    let buf = "";
+    const onData = (d) => {
+      buf += d.toString();
+      const lines = buf.split("\n").filter(l => l.trim());
+      for (const line of lines) {
+        try {
+          const r = JSON.parse(line);
+          if (r.id === id) { clearTimeout(t); server.stdout.removeListener("data", onData); res(r); return; }
+        } catch {}
+      }
+    };
+    server.stdout.on("data", onData);
+  });
+}
+
+function getText(rpcResponse) {
+  const content = rpcResponse?.result?.content;
+  if (!content || !content.length) return "";
+  return content[0]?.text || "";
+}
+
+describe("E2E workflow", () => {
+  const tmp = "/tmp/shrinker-e2e-" + Date.now();
+  const srcFile = join(tmp, "src", "calc.js");
+  let server;
+
+  before(async () => {
+    mkdirSync(join(tmp, "src"), { recursive: true });
+    writeFileSync(srcFile, "export function add(a, b) {\n  return a + b;\n}\n");
+
+    server = spawn(process.execPath, [join(repoRoot, "src", "index.js")], {
+      cwd: repoRoot,
+      env: { ...process.env, CODE_SHRINKER_ALLOWED_ROOTS: tmp },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // Wait for ready
+    let stderr = "";
+    await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error("startup timeout")), 8000);
+      server.stderr.on("data", d => {
+        stderr += d.toString();
+        if (stderr.includes("ready")) { clearTimeout(t); res(); }
+      });
+      server.on("error", rej);
+    });
+  });
+
+  after(() => { server?.kill(); try { rmSync(tmp, { recursive: true }); } catch {} });
+
+  it("full cycle: init → contracts → create → propose → validate → apply", async () => {
+    // Init
+    const init = await rpcCall(server, "initialize", { protocolVersion: "1.0", capabilities: {}, clientInfo: { name: "e2e", version: "1" } });
+    assert.ok(init.result, "init: " + JSON.stringify(init).slice(0, 100));
+    await rpcCall(server, "notifications/initialized", {});
+
+    // Contracts
+    const fc = await rpcCall(server, "tools/call", { name: "file.contracts", arguments: { filePath: srcFile } });
+    const fcText = getText(fc);
+    const fcObj = JSON.parse(fcText);
+    assert.ok(fcObj.contracts?.length > 0, "must have contracts");
+
+    // Context
+    const ctx = await rpcCall(server, "tools/call", {
+      name: "context.create",
+      arguments: { task: { type: "bugfix", description: "fix", target: "add" }, targetFile: srcFile, mode: "safe" }
+    });
+    const ctxObj = JSON.parse(getText(ctx));
+    assert.ok(ctxObj.contextId, "contextId required");
+
+    // IDs match
+    const addCtr = fcObj.contracts.find(c => c.handle?.includes("add"));
+    const addSrc = ctxObj.packet?.sources?.find(s => s.handle?.includes("add"));
+    assert.ok(addCtr, "contract for add");
+    assert.ok(addSrc, "source for add");
+    assert.equal(addCtr.id, addSrc.id, "IDs must match");
+
+    // Propose
+    const prop = await rpcCall(server, "tools/call", {
+      name: "patch.propose",
+      arguments: { contextId: ctxObj.contextId, edits: [{ operation: "replace_symbol", symbol: addSrc.handle, code: "export function add(a, b) {\n  return a + b + 0;\n}\n" }] }
+    });
+    const propObj = JSON.parse(getText(prop));
+    assert.ok(propObj.patchId, "patchId required");
+
+    // Validate
+    const val = await rpcCall(server, "tools/call", { name: "patch.validate", arguments: { patchId: propObj.patchId } });
+    const valObj = JSON.parse(getText(val));
+    assert.ok(valObj.status === "valid" || valObj.status === "inconclusive", "validation status: " + valObj.status);
+
+    // Apply
+    const app = await rpcCall(server, "tools/call", { name: "patch.apply", arguments: { patchId: propObj.patchId } });
+    const appObj = JSON.parse(getText(app));
+    assert.equal(appObj.status, "applied", "must be applied");
+
+    // Verify file content
+    const content = readFileSync(srcFile, "utf-8");
+    assert.ok(content.includes("a + b + 0"), "file must contain patched code");
+  });
+});

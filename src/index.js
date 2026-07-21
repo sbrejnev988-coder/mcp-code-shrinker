@@ -37,6 +37,12 @@ function isInside(root, candidate) {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+function rootForFile(filePath) {
+  const root = CONFIGURED_ROOTS.find(r => isInside(r, filePath));
+  if (!root) throw new Error("NO_ROOT_FOR_FILE: " + filePath);
+  return root;
+}
+
 async function resolveInsideRoot(inputPath) {
   try {
     const rp = realpathSync(inputPath);
@@ -107,7 +113,7 @@ async function handleFileContracts(args) {
   const contracts = parsed.symbols.map(sym => {
     const c = extractContract(sym, parsed.code, parsed.language);
     return {
-      id: symId(CONFIGURED_ROOTS[0] || ".", fp, parsed, sym),
+      id: symId(rootForFile(fp), fp, parsed, sym),
       revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
       handle: `@${sym.qualifiedName}`, kind: sym.kind, signature: c.signature, visibility: c.visibility,
       effects: c.effects, throws: c.throws, calls: c.calls, properties: c.properties, confidence: c.confidence,
@@ -124,7 +130,7 @@ async function handleSymbolSource(args) {
   if (!sym) return err(`Symbol not found: ${args.symbol}`);
   const c = extractContract(sym, parsed.code, parsed.language);
   const result = {
-    id: symId(CONFIGURED_ROOTS[0] || ".", fp, parsed, sym),
+    id: symId(rootForFile(fp), fp, parsed, sym),
     revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
     fileRevision: createFileRevision(parsed.code), handle: `@${sym.qualifiedName}`, kind: sym.kind, language: parsed.language,
     range: [sym.startLine, sym.endLine],
@@ -147,7 +153,7 @@ async function handleSymbolContext(args) {
 
 async function handleContextCreate(args) {
   const tf = await resolveInsideRoot(args.targetFile);
-  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: CONFIGURED_ROOTS[0] || "." });
+  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: rootForFile(fp) });
   if (callGraph && args.task?.target) {
     const callers = callGraph.callers(tf, args.task.target);
     const tests = callGraph.getTests(tf, args.task.target);
@@ -175,7 +181,7 @@ async function handleContextExpand(args) {
       const sym = parsed.symbols.find(s => s.qualifiedName === req.symbol || s.name === req.symbol);
       if (!sym) { added.sources.push({ symbol: req.symbol, status: "not_found" }); continue; }
       const c = extractContract(sym, parsed.code, parsed.language);
-      const sid = symId(CONFIGURED_ROOTS[0] || ".", fp, parsed, sym);
+      const sid = symId(rootForFile(fp), fp, parsed, sym);
       const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
       const h = packet.handles.register(sid, sym.qualifiedName, fp);
       if (!packet.packet.contracts.find(x => x.id === sid)) {
@@ -207,20 +213,20 @@ async function handleContextInspect(args) {
 
 async function handlePatchPropose(args) {
   const packet = sessions.get(args.contextId);
-  if (!packet) return err(`Context: ${args.contextId}`);
+  if (!packet) return err("Context: " + args.contextId);
   for (const edit of (args.edits || [])) {
     if (edit.operation === "replace_symbol") {
-      const known = (packet.packet.contracts || []).find(c => c.handle === edit.symbol || c.id === edit.symbol);
-      const knownSrc = (packet.packet.sources || []).find(s => s.handle === edit.symbol || s.id === edit.symbol);
-      if (!known && !knownSrc) return err(`Unknown: ${edit.symbol}`);
-      if (known && known.range) { edit.startLine = known.range[0]; edit.endLine = known.range[1]; }
-      // Block cross-file edits — symbol must belong to target file
-      const resolved = packet.handles.resolve(edit.symbol);
-      if (resolved && resolved.file !== packet._targetFile) return err('CROSS_FILE_EDIT: ' + edit.symbol + ' is in ' + resolved.file);
+      const ctr = (packet.packet.contracts || []).find(c => c.handle === edit.symbol || c.id === edit.symbol);
+      const src = (packet.packet.sources || []).find(s => s.handle === edit.symbol || s.id === edit.symbol);
+      const known = src || ctr;
+      if (!known) return err("UNKNOWN_SYMBOL: " + edit.symbol);
+      if (ctr && ctr.range) { edit.startLine = ctr.range[0]; edit.endLine = ctr.range[1]; }
+      if (known.file && known.file !== packet._targetFile) return err("CROSS_FILE_EDIT: " + edit.symbol + " in " + known.file);
     }
   }
-  const patchId = `patch_${randomUUID().slice(0, 12)}`;
-  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: packet._targetFile, expectedFileRevision: packet._targetFileRevision, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
+  const patchId = "patch_" + randomUUID().slice(0, 12);
+  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: packet._targetFile, expectedFileRevision: packet._targetFileRevision, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) };
+  patches.set(patchId, ref);
   return ok({ patchId, contextId: args.contextId, edits: args.edits.map(e => ({ ...e, status: "proposed" })), note: "Use patch.validate with this patchId next." });
 }
 
@@ -237,7 +243,7 @@ async function handlePatchValidate(args) {
   const currentFileRev = createFileRevision(readFileSync(filePath, 'utf-8'));
   if (proposed.expectedFileRevision && currentFileRev !== proposed.expectedFileRevision) return err('STALE_FILE_SINCE_CONTEXT');
   // Init validator from configured root that contains this file
-  const projectRoot = CONFIGURED_ROOTS.find(r => isInside(r, filePath)) || resolve('.');
+  const projectRoot = rootForFile(filePath);
   let vtor = validators.get(projectRoot); if (!vtor) { vtor = new PatchValidator({ projectRoot }); validators.set(projectRoot, vtor); }
   const fileHash = existsSync(filePath) ? createFileRevision(readFileSync(filePath, "utf-8")) : null;
   const result = vtor.validate({ patchId: args.patchId, filePath, originalHash: fileHash, edits: proposed.edits });
