@@ -107,7 +107,7 @@ async function handleFileContracts(args) {
   const contracts = parsed.symbols.map(sym => {
     const c = extractContract(sym, parsed.code, parsed.language);
     return {
-      id: createSymbolId({ projectRelativePath: relative(".", fp), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }),
+      id: symId(CONFIGURED_ROOTS[0] || ".", fp, parsed, sym),
       revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
       handle: `@${sym.qualifiedName}`, kind: sym.kind, signature: c.signature, visibility: c.visibility,
       effects: c.effects, throws: c.throws, calls: c.calls, properties: c.properties, confidence: c.confidence,
@@ -124,7 +124,7 @@ async function handleSymbolSource(args) {
   if (!sym) return err(`Symbol not found: ${args.symbol}`);
   const c = extractContract(sym, parsed.code, parsed.language);
   const result = {
-    id: createSymbolId({ projectRelativePath: relative(".", fp), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }),
+    id: symId(CONFIGURED_ROOTS[0] || ".", fp, parsed, sym),
     revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
     fileRevision: createFileRevision(parsed.code), handle: `@${sym.qualifiedName}`, kind: sym.kind, language: parsed.language,
     range: [sym.startLine, sym.endLine],
@@ -155,6 +155,7 @@ async function handleContextCreate(args) {
     if (tests.length) packet.packet.relatedTests = tests;
   }
   packet._targetFile = tf;
+  packet._targetFileRevision = createFileRevision(readFileSync(tf, 'utf-8'));
   sessions.set(packet.contextId, packet);
   return ok({ contextId: packet.contextId, revision: packet.revision, task: packet.task, layers: packet.layers, tokens: packet.tokens, risk: packet.risk, qualitySatisfied: packet.qualitySatisfied, estimatedQuality: packet.estimatedQuality, loss: { removed: packet.loss.removed, preserved: packet.loss.preserved, risk: packet.loss.risk }, aliases: packet.aliases, packet: packet.packet, omitted: packet.omitted });
 }
@@ -174,7 +175,7 @@ async function handleContextExpand(args) {
       const sym = parsed.symbols.find(s => s.qualifiedName === req.symbol || s.name === req.symbol);
       if (!sym) { added.sources.push({ symbol: req.symbol, status: "not_found" }); continue; }
       const c = extractContract(sym, parsed.code, parsed.language);
-      const sid = createSymbolId({ projectRelativePath: relative(".", fp), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
+      const sid = symId(CONFIGURED_ROOTS[0] || ".", fp, parsed, sym);
       const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
       const h = packet.handles.register(sid, sym.qualifiedName, fp);
       if (!packet.packet.contracts.find(x => x.id === sid)) {
@@ -213,10 +214,13 @@ async function handlePatchPropose(args) {
       const knownSrc = (packet.packet.sources || []).find(s => s.handle === edit.symbol || s.id === edit.symbol);
       if (!known && !knownSrc) return err(`Unknown: ${edit.symbol}`);
       if (known && known.range) { edit.startLine = known.range[0]; edit.endLine = known.range[1]; }
+      // Block cross-file edits — symbol must belong to target file
+      const resolved = packet.handles.resolve(edit.symbol);
+      if (resolved && resolved.file !== packet._targetFile) return err('CROSS_FILE_EDIT: ' + edit.symbol + ' is in ' + resolved.file);
     }
   }
   const patchId = `patch_${randomUUID().slice(0, 12)}`;
-  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: packet._targetFile, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
+  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: packet._targetFile, expectedFileRevision: packet._targetFileRevision, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) }; patches.set(patchId, ref);
   return ok({ patchId, contextId: args.contextId, edits: args.edits.map(e => ({ ...e, status: "proposed" })), note: "Use patch.validate with this patchId next." });
 }
 
@@ -229,15 +233,25 @@ async function handlePatchValidate(args) {
   if (ctx.revision !== proposed.contextRevision) return err('STALE_CONTEXT');
   if (createFileRevision(JSON.stringify(proposed.edits)) !== proposed.editsHash) return err('PATCH_TAMPERED');
   const filePath = await resolveInsideRoot(proposed.filePath);
-  if (!validator) validator = new PatchValidator({ projectRoot: resolve(".") });
+  // Check file hasn\'t changed since context.create
+  const currentFileRev = createFileRevision(readFileSync(filePath, 'utf-8'));
+  if (proposed.expectedFileRevision && currentFileRev !== proposed.expectedFileRevision) return err('STALE_FILE_SINCE_CONTEXT');
+  // Init validator from configured root that contains this file
+  const projectRoot = CONFIGURED_ROOTS.find(r => isInside(r, filePath)) || resolve('.');
+  if (!validator) validator = new PatchValidator({ projectRoot });
   const fileHash = existsSync(filePath) ? createFileRevision(readFileSync(filePath, "utf-8")) : null;
   const result = validator.validate({ patchId: args.patchId, filePath, originalHash: fileHash, edits: proposed.edits });
   return ok(result);
 }
 
 async function handlePatchApply(args) {
-  if (!validator) return err("Validator not initialized");
-  const fp = await resolveInsideRoot(args.filePath);
+  if (!validator) return err('Validator not initialized');
+  if (!args.patchId) return err('patchId required');
+  const validation = validator.results.get(args.patchId);
+  if (!validation) return err('Validation not found — run patch.validate first');
+  // Use filePath from validation record, not from model
+  const proposed = patches.get(args.patchId);
+  const fp = proposed?.filePath ? await resolveInsideRoot(proposed.filePath) : resolve('.');
   const result = validator.apply({ patchId: args.patchId, filePath: fp });
   return ok(result);
 }
