@@ -54,7 +54,7 @@ function findFiles(dir, max=200) {
     for(const n of e){if(skip.has(n)||n.startsWith("."))continue;const f=join(d,n);let s;try{s=statSync(f)}catch{continue}
     if(s.isDirectory())walk(f);else if(/\.(js|ts|py)$/.test(n))files.push(f);}
   }
-  walk(resolve(projectPath)); return files;
+  walk(resolve(dir)); return files;
 }
 
 // Self-test
