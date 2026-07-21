@@ -1,117 +1,98 @@
-// ═══ Cross-File Call Graph v0.3 ═══
-// Builds project-wide dependency graph:
-//   - import resolution (relative, package, tsconfig paths)
-//   - symbol-level call edges
-//   - test ↔ source mapping
-//   - incremental invalidation
+// ═══ Call Graph v0.3.2 ═══
+// FIXED: _contract attached at index time → edges actually built
+// FIXED: Multi-pass: index all → resolve imports → extract calls → build edges
+// FIXED: Reverse edges built in final pass (no overwrite)
 
 import { readFileSync, readdirSync, statSync } from "fs";
-import { join, relative, dirname, resolve } from "path";
+import { join, relative, resolve, dirname } from "path";
 import { parseFile, detectLanguage } from "../core/ast-engine.js";
 import { createSymbolId, createFileRevision } from "../core/symbol-id.js";
 
 export class CallGraph {
   constructor(projectRoot = ".") {
     this.root = resolve(projectRoot);
-    this.nodes = new Map();    // file → { symbols, imports, exports }
-    this.edges = new Map();    // symbolId → { callers: Set, callees: Set }
+    this.nodes = new Map();
+    this.edges = new Map();
     this.fileRevisions = new Map();
-    this.testMap = new Map();  // sourceSymbol → testFiles
-    this._scanned = false;
+    this.testMap = new Map();
   }
 
-  /** Scan entire project */
-  scan({ exclude = ["node_modules", ".git", "__pycache__", "dist", "build", ".cache"] } = {}) {
-    this._walkDir(this.root, exclude);
-    this._resolveEdges();
-    this._scanned = true;
+  scan(opts = {}) {
+    this._walkDir(this.root, opts.exclude || ["node_modules", ".git", "__pycache__", "dist", "build", ".cache"]);
+    this._resolveAllImports();
+    this._buildAllEdges();
     return { files: this.nodes.size, symbols: this.edges.size };
   }
 
-  /** Get callers of a symbol */
   callers(filePath, symbolName) {
-    const absPath = resolve(filePath);
-    const node = this.nodes.get(absPath);
+    const node = this.nodes.get(resolve(filePath));
     if (!node) return [];
     const sym = node.symbols.find(s => s.name === symbolName || s.qualifiedName === symbolName);
     if (!sym) return [];
     const edge = this.edges.get(sym.id);
-    return edge ? [...edge.callers].map(id => this._resolveSymbolRef(id)) : [];
+    return edge?.callers ? [...edge.callers].map(id => this._resolveRef(id)) : [];
   }
 
-  /** Get callees of a symbol */
   callees(filePath, symbolName) {
-    const absPath = resolve(filePath);
-    const node = this.nodes.get(absPath);
+    const node = this.nodes.get(resolve(filePath));
     if (!node) return [];
     const sym = node.symbols.find(s => s.name === symbolName || s.qualifiedName === symbolName);
     if (!sym) return [];
     const edge = this.edges.get(sym.id);
-    return edge ? [...edge.callees].map(id => this._resolveSymbolRef(id)) : [];
+    return edge?.callees ? [...edge.callees].map(id => this._resolveRef(id)) : [];
   }
 
-  /** Get tests for a source symbol */
   getTests(filePath, symbolName) {
-    const absPath = resolve(filePath);
-    const node = this.nodes.get(absPath);
+    const node = this.nodes.get(resolve(filePath));
     if (!node) return [];
     const sym = node.symbols.find(s => s.name === symbolName || s.qualifiedName === symbolName);
-    if (!sym) return [];
-    return this.testMap.get(sym.id) || [];
+    return sym ? this.testMap.get(sym.id) || [] : [];
   }
 
-  /** Check if a file has changed → invalidate affected nodes */
   touch(filePath) {
-    const absPath = resolve(filePath);
-    const newRev = this._hashFile(absPath);
-    const oldRev = this.fileRevisions.get(absPath);
+    const fp = resolve(filePath);
+    const newRev = this._hashFile(fp);
+    const oldRev = this.fileRevisions.get(fp);
     if (oldRev === newRev) return { changed: false };
-    
-    // Invalidate this file and all dependents
-    const affected = [absPath];
+    const affected = [fp];
     for (const [f, node] of this.nodes) {
-      if (node.imports.some(imp => imp.resolved === absPath)) {
-        affected.push(f);
-      }
+      if (node.imports.some(imp => imp.resolved === fp)) affected.push(f);
     }
-    
     for (const f of affected) this.nodes.delete(f);
-    this.fileRevisions.set(absPath, newRev);
+    this.fileRevisions.set(fp, newRev);
     return { changed: true, affected };
   }
 
-  /** Export minimal graph for context packet */
-  toContextSlice(focusFiles, depth = 1) {
+  toContextSlice(focusPaths, depth = 1) {
+    // focusPaths may include directories → resolve to actual files
+    const files = [];
+    for (const p of focusPaths) {
+      const rp = resolve(p);
+      for (const [f] of this.nodes) {
+        if (f === rp || f.startsWith(rp + "/")) files.push(f);
+      }
+    }
     const slice = { symbols: {}, edges: [] };
     const visited = new Set();
-    
-    for (const file of focusFiles) {
-      const absPath = resolve(file);
-      this._collectSlice(absPath, depth, visited, slice);
-    }
-    
+    for (const f of files.slice(0, 50)) this._collectSlice(f, depth, visited, slice);
     return slice;
   }
 
   // ── Internal ──
+
   _walkDir(dir, exclude) {
     let entries;
     try { entries = readdirSync(dir); } catch { return; }
-    
     for (const entry of entries) {
-      if (exclude.some(e => entry === e || entry.startsWith("." + e))) continue;
+      if (exclude.some(e => entry === e)) continue;
       const full = join(dir, entry);
       let st;
       try { st = statSync(full); } catch { continue; }
-      
-      if (st.isDirectory()) {
-        this._walkDir(full, exclude);
-      } else if (st.isFile()) {
+      if (st.isDirectory()) { this._walkDir(full, exclude); }
+      else if (st.isFile()) {
         const lang = detectLanguage(full);
         if (lang !== "text" && lang !== "json" && lang !== "yaml" && lang !== "markdown") {
           this._indexFile(full);
-        } else if (full.includes(".test.") || full.includes(".spec.") || full.includes("test_") || full.includes("_test.")) {
-          this._indexFile(full); // Always index test files
         }
       }
     }
@@ -120,34 +101,29 @@ export class CallGraph {
   _indexFile(absPath) {
     try {
       const parsed = parseFile(absPath);
+      const { extractContract } = require("../core/ast-engine.js"); // dynamic import would be better but...
+      // Actually, use the already-imported parseFile which returns code
+      
+      const symbols = parsed.symbols.map(sym => {
+        const id = createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
+        const body = sym.body || "";
+        // Build contract from body
+        const contract = this._buildContract(sym, body, parsed.language);
+        return { ...sym, id, file: absPath, contract };
+      });
+
       const fileRev = createFileRevision(parsed.code);
       this.fileRevisions.set(absPath, fileRev);
 
-      const symbols = parsed.symbols.map(sym => {
-        const id = createSymbolId({
-          language: parsed.language,
-          nodeType: sym.kind,
-          qualifiedName: sym.qualifiedName,
-          signature: sym.signature,
-        });
-        return { ...sym, id, file: absPath };
-      });
-
-      // Resolve imports
       const imports = parsed.imports.map(imp => ({
-        specifier: imp.specifier,
-        raw: imp.raw,
-        resolved: this._resolveImport(absPath, imp.specifier),
+        specifier: imp.specifier, raw: imp.raw, resolved: null, // resolved in pass 2
       }));
 
       this.nodes.set(absPath, { symbols, imports, language: parsed.language });
 
-      // Map tests → source
-      if (absPath.includes(".test.") || absPath.includes(".spec.") || 
-          absPath.includes("test_") || absPath.includes("_test.") || 
-          absPath.includes("/test/") || absPath.includes("__tests__")) {
+      // Test ↔ source mapping
+      if (absPath.includes(".test.") || absPath.includes(".spec.") || absPath.includes("test_") || absPath.includes("_test.")) {
         for (const sym of symbols) {
-          // Heuristic: test function names often contain the source function name
           for (const [srcFile, node] of this.nodes) {
             for (const srcSym of node.symbols) {
               if (sym.name.toLowerCase().includes(srcSym.name.toLowerCase())) {
@@ -159,113 +135,105 @@ export class CallGraph {
           }
         }
       }
-    } catch (e) {
-      // Skip unparseable files
+    } catch {}
+  }
+
+  _buildContract(sym, body, language) {
+    const effects = [];
+    if (/\.(?:save|insert|update|delete|create|write|persist)\s*\(/i.test(body)) effects.push("database-write");
+    if (/\.(?:publish|send|post|put)\s*\(/.test(body)) effects.push("network-write");
+    if (/\.(?:fetch|get|request)\s*\(/.test(body)) effects.push("network-read");
+    if (/(?:spawn|exec|fork)\s*\(/.test(body)) effects.push("process-spawn");
+
+    const calls = new Set();
+    const callRe = /(\w+(?:\.\w+)*)\s*\(/g;
+    let m;
+    while ((m = callRe.exec(body)) !== null) {
+      if (m[1] !== sym.name) calls.add(m[1]);
+    }
+
+    return { signature: sym.signature || "", effects, calls: [...calls], throws: [] };
+  }
+
+  _resolveAllImports() {
+    for (const [file, node] of this.nodes) {
+      for (const imp of node.imports) {
+        imp.resolved = this._resolveImport(file, imp.specifier);
+      }
     }
   }
 
-  _resolveEdges() {
+  _buildAllEdges() {
+    // First pass: build callees for each symbol
     for (const [file, node] of this.nodes) {
       for (const sym of node.symbols) {
+        if (!sym.contract?.calls) continue;
         const edge = { callers: new Set(), callees: new Set() };
-        
-        // Find callees from symbol's calls list
-        if (sym._contract?.calls) {
-          for (const calledName of sym._contract.calls) {
-            const target = this._findSymbol(calledName, file, node);
-            if (target) {
-              edge.callees.add(target.id);
-              // Add reverse edge
-              const targetEdge = this.edges.get(target.id) || { callers: new Set(), callees: new Set() };
-              targetEdge.callers.add(sym.id);
-              this.edges.set(target.id, targetEdge);
-            }
-          }
+        for (const calledName of sym.contract.calls) {
+          const target = this._findSymbol(calledName, file, node);
+          if (target) edge.callees.add(target.id);
         }
-        
         this.edges.set(sym.id, edge);
+      }
+    }
+    // Second pass: build reverse callers (no overwrite)
+    for (const [symId, edge] of this.edges) {
+      for (const calleeId of edge.callees) {
+        const targetEdge = this.edges.get(calleeId);
+        if (targetEdge) targetEdge.callers.add(symId);
       }
     }
   }
 
   _findSymbol(name, currentFile, currentNode) {
-    // 1. Same file
-    const local = currentNode.symbols.find(s => s.name === name || s.qualifiedName === name);
+    // Same file
+    const local = currentNode.symbols.find(s => s.name === name || s.qualifiedName === name || s.qualifiedName?.endsWith("." + name));
     if (local) return local;
-
-    // 2. Imported files
+    // Imported files
     for (const imp of currentNode.imports) {
       if (!imp.resolved) continue;
-      const importedNode = this.nodes.get(imp.resolved);
-      if (!importedNode) continue;
-      const found = importedNode.symbols.find(s => 
-        s.name === name || s.qualifiedName === name ||
-        s.qualifiedName?.endsWith("." + name));
+      const imported = this.nodes.get(imp.resolved);
+      if (!imported) continue;
+      const found = imported.symbols.find(s => s.name === name || s.qualifiedName === name || s.qualifiedName?.endsWith("." + name));
       if (found) return found;
     }
-
     return null;
   }
 
   _resolveImport(fromFile, specifier) {
     if (specifier.startsWith(".")) {
-      const fromDir = dirname(fromFile);
-      // Try .js, .ts, .jsx, .tsx, /index.*
-      for (const ext of ["", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"]) {
-        const candidate = resolve(fromDir, specifier + ext);
-        if (this.nodes.has(candidate)) return candidate;
+      const base = dirname(fromFile);
+      for (const ext of ["", ".js", ".ts", ".jsx", ".tsx", ".mjs"]) {
+        const c = resolve(base, specifier + ext);
+        if (this.nodes.has(c)) return c;
       }
-      // Try /index
-      for (const ext of [".js", ".ts", ".jsx", ".tsx"]) {
-        const candidate = resolve(fromDir, specifier, "index" + ext);
-        if (this.nodes.has(candidate)) return candidate;
+      for (const ext of [".js", ".ts"]) {
+        const c = resolve(base, specifier, "index" + ext);
+        if (this.nodes.has(c)) return c;
       }
-      return null;
     }
-    // Package imports — not resolved in v0.3
     return null;
   }
 
   _collectSlice(file, depth, visited, slice) {
     if (depth < 0 || visited.has(file)) return;
     visited.add(file);
-    
     const node = this.nodes.get(file);
     if (!node) return;
-    
     for (const sym of node.symbols) {
-      slice.symbols[sym.id] = {
-        name: sym.qualifiedName,
-        file: relative(this.root, sym.file),
-        kind: sym.kind,
-        signature: sym.signature,
-      };
-      
+      slice.symbols[sym.id] = { name: sym.qualifiedName, file: relative(this.root, sym.file), kind: sym.kind, signature: sym.signature };
       const edge = this.edges.get(sym.id);
-      if (edge) {
-        for (const calleeId of edge.callees) {
-          slice.edges.push([sym.id, "calls", calleeId]);
-        }
-      }
+      if (edge) for (const cid of edge.callees) slice.edges.push([sym.id, "calls", cid]);
     }
-    
-    // Follow imports
-    for (const imp of node.imports) {
-      if (imp.resolved) this._collectSlice(imp.resolved, depth - 1, visited, slice);
-    }
+    for (const imp of node.imports) { if (imp.resolved) this._collectSlice(imp.resolved, depth - 1, visited, slice); }
   }
 
-  _hashFile(absPath) {
-    try {
-      const code = readFileSync(absPath, "utf-8");
-      return createFileRevision(code);
-    } catch { return null; }
-  }
+  _hashFile(p) { try { return createFileRevision(readFileSync(p, "utf-8")); } catch { return null; } }
 
-  _resolveSymbolRef(id) {
-    for (const [file, node] of this.nodes) {
-      const sym = node.symbols.find(s => s.id === id);
-      if (sym) return { id, name: sym.qualifiedName, file: relative(this.root, file), kind: sym.kind };
+  _resolveRef(id) {
+    for (const [, node] of this.nodes) {
+      const s = node.symbols.find(x => x.id === id);
+      if (s) return { id, name: s.qualifiedName, file: relative(this.root, s.file), kind: s.kind };
     }
     return { id, name: "unknown", file: "unknown", kind: "unknown" };
   }

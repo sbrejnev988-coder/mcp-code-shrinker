@@ -1,116 +1,147 @@
-// ═══ AST Engine v2.0 ═══
-// Two-layer architecture:
-//   Layer 1: CST parser (tree-sitter with regex fallback) → byte ranges, node types
-//   Layer 2: Language semantic adapter → types, imports, references, callers
-//
-// Tree-sitter handles: byte ranges, node types, nesting, incremental parsing, broken code
-// Adapters handle: import resolution, types, overloads, inheritance, interfaces
+// ═══ AST Engine v0.3.2 ═══
+// FIXED: Full function/class body extraction via brace counting
+// FIXED: endLine now points to CLOSING brace, not opening
+// string-aware, comment-aware brace matching
 
 import { readFileSync } from "fs";
-import { extname, basename } from "path";
+import { extname } from "path";
 
-// ═══ Language Detection ═══
 const EXT_MAP = {
-  ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
-  ".ts": "typescript", ".mts": "typescript", ".cts": "typescript",
-  ".tsx": "tsx", ".jsx": "jsx",
-  ".py": "python", ".pyi": "python",
-  ".go": "go",
-  ".rs": "rust",
-  ".sh": "bash", ".bash": "bash",
-  ".json": "json", ".yaml": "yaml", ".yml": "yaml",
-  ".md": "markdown",
+  ".js":"javascript", ".mjs":"javascript", ".cjs":"javascript",
+  ".ts":"typescript", ".mts":"typescript", ".tsx":"tsx", ".jsx":"jsx",
+  ".py":"python", ".pyi":"python", ".go":"go", ".rs":"rust",
+  ".sh":"bash", ".json":"json", ".yaml":"yaml", ".yml":"yaml", ".md":"markdown",
 };
 
-function detectLanguage(filePath) {
-  const ext = extname(filePath).toLowerCase();
-  return EXT_MAP[ext] || "text";
+export function detectLanguage(filePath) {
+  return EXT_MAP[extname(filePath).toLowerCase()] || "text";
 }
 
-// ═══ Regex-based Parser (fallback when tree-sitter unavailable) ═══
-// MUCH better than v1: comment/string-aware, scope-tracking, accurate line mapping
+// ═══ Full body extraction via brace/indent matching ═══
+
+function findBlockEnd(code, openIdx, lang) {
+  if (lang === "python") return findPythonBlockEnd(code, openIdx);
+  return findBraceBlockEnd(code, openIdx);
+}
+
+function findBraceBlockEnd(code, openIdx) {
+  let depth = 0, quote = null, escaped = false;
+  for (let i = openIdx; i < code.length; i++) {
+    const ch = code[i];
+    if (escaped) { escaped = false; continue; }
+    if (quote) {
+      if (ch === "\\") escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") { quote = ch; continue; }
+    if (ch === "/" && i+1 < code.length) {
+      const nxt = code[i+1];
+      if (nxt === "/") { while (i < code.length && code[i] !== "\n") i++; continue; }
+      if (nxt === "*") { i += 2; while (i < code.length && !(code[i] === "*" && code[i+1] === "/")) i++; i++; continue; }
+    }
+    if (ch === "{") depth++;
+    if (ch === "}") { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+function findPythonBlockEnd(code, colonIdx) {
+  const lines = code.slice(colonIdx).split("\n");
+  if (lines.length < 2) return colonIdx;
+  const header = lines[0];
+  const baseIndent = header.search(/\S|$/);
+  let endPos = colonIdx + header.length;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") { endPos += line.length + 1; continue; }
+    const indent = line.search(/\S|$/);
+    if (indent <= baseIndent && line.trim() !== "") break;
+    endPos += line.length + 1;
+  }
+  return endPos;
+}
+
+// ═══ Regex-based Parser with CORRECT body ranges ═══
 
 class RegexParser {
-  constructor(language) {
-    this.language = language;
-  }
+  constructor(language) { this.language = language; }
 
   parse(code) {
     const lines = code.split("\n");
     const symbols = [];
-    let inBlockComment = false;
-    let inString = false;
-    let stringChar = "";
-    let scopeDepth = 0;
     let scopeStack = [];
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const trimmed = line.trim();
-
-      // Track block comments
-      if (inBlockComment) {
-        if (trimmed.includes("*/")) inBlockComment = false;
-        continue;
-      }
-      if (trimmed.startsWith("/*") || trimmed.startsWith("/**")) {
-        if (!trimmed.includes("*/")) inBlockComment = true;
-        continue;
-      }
-      // Skip line comments
+      
+      // Skip comments
       if (trimmed.startsWith("//") || trimmed.startsWith("#")) continue;
+      if (trimmed.startsWith("/*")) {
+        let j = i;
+        while (j < lines.length && !lines[j].includes("*/")) j++;
+        i = j;
+        continue;
+      }
 
-      // Detect function/method/class declarations
+      // Detect declarations
       const patterns = this._getPatterns();
       for (const pat of patterns) {
         const m = trimmed.match(pat.regex);
-        if (m) {
-          const name = m[1];
-          // Find the full signature (may span multiple lines)
-          let sigStart = i;
-          let sigEnd = i;
-          let braceCount = 0;
-          let foundOpen = false;
-          
-          for (let j = i; j < Math.min(i + 20, lines.length); j++) {
-            const l = lines[j];
-            for (const ch of l) {
-              if (ch === "(" || ch === "{") braceCount++;
-              if (ch === ")" || ch === "}") braceCount--;
-              if (ch === "{" && braceCount === 1) foundOpen = true;
+        if (!m) continue;
+
+        const name = m[1];
+        const qualifiedName = scopeStack.length > 0
+          ? `${scopeStack[scopeStack.length-1]}.${name}`
+          : name;
+
+        // Find opening brace/colon position in original code
+        let lineStartPos = 0;
+        for (let k = 0; k < i; k++) lineStartPos += lines[k].length + 1;
+        const lineContent = lines.slice(i).join("\n");
+        const relMatch = lineContent.match(pat.regex);
+        const matchPos = lineStartPos + (relMatch ? relMatch.index + relMatch[0].length : 0);
+
+        // Find opening { or :
+        let openIdx = -1;
+        const rest = code.slice(matchPos);
+        const braceMatch = rest.match(/[{(:]/);
+        if (braceMatch) openIdx = matchPos + braceMatch.index;
+
+        let endByte = code.length - 1;
+        let endLine = lines.length;
+
+        if (openIdx >= 0) {
+          const closeIdx = findBlockEnd(code, openIdx, this.language);
+          if (closeIdx >= 0) {
+            endByte = closeIdx;
+            // Convert byte offset to line number
+            let pos = 0;
+            for (let k = 0; k < lines.length; k++) {
+              pos += lines[k].length + 1;
+              if (pos > closeIdx) { endLine = k + 1; break; }
             }
-            if (foundOpen) { sigEnd = j; break; }
           }
-
-          // Build qualified name
-          let qualifiedName = name;
-          if (scopeStack.length > 0) {
-            const currentScope = scopeStack[scopeStack.length - 1];
-            qualifiedName = `${currentScope}.${name}`;
-          }
-
-          // Extract signature
-          const sigLines = lines.slice(sigStart, sigEnd + 1);
-          const sigText = sigLines.join(" ").replace(/\s+/g, " ").trim();
-          const parenIdx = sigText.indexOf("(");
-          const signature = parenIdx >= 0 ? sigText.slice(parenIdx) : "()";
-
-          symbols.push({
-            name,
-            qualifiedName,
-            kind: pat.kind,
-            signature,
-            startLine: i + 1,
-            endLine: sigEnd + 1,
-            language: this.language,
-          });
-
-          // Track class scope
-          if (pat.kind === "class") {
-            scopeStack.push(qualifiedName);
-          }
-          break;
         }
+
+        // Extract signature
+        const sigOpen = code.indexOf("(", matchPos);
+        let sig = "()";
+        if (sigOpen >= 0 && sigOpen < endByte) {
+          const sigClose = findMatchingParen(code, sigOpen);
+          if (sigClose >= 0) sig = code.slice(sigOpen, sigClose + 1).replace(/\s+/g, " ").trim();
+        }
+
+        symbols.push({
+          name, qualifiedName, kind: pat.kind, signature: sig,
+          startLine: i + 1, endLine,
+          startByte: matchPos, endByte,
+          body: code.slice(matchPos, endByte + 1),
+        });
+
+        if (pat.kind === "class") scopeStack.push(qualifiedName);
+        break;
       }
     }
 
@@ -118,12 +149,11 @@ class RegexParser {
   }
 
   _getPatterns() {
-    const patterns = {
+    return {
       javascript: [
         { regex: /^(?:export\s+)?(?:async\s+)?function\s+(\w+)/, kind: "function" },
         { regex: /^(?:export\s+)?class\s+(\w+)/, kind: "class" },
         { regex: /^(?:static\s+)?(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{/, kind: "method" },
-        { regex: /^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/, kind: "arrow" },
       ],
       typescript: [
         { regex: /^(?:export\s+)?(?:async\s+)?function\s+(\w+)/, kind: "function" },
@@ -137,180 +167,107 @@ class RegexParser {
         { regex: /^class\s+(\w+)/, kind: "class" },
         { regex: /^(?:async\s+)?def\s+(\w+)\s*\(/, kind: "async_function" },
       ],
-    };
-    return patterns[this.language] || patterns.javascript;
+    }[this.language] || [
+      { regex: /^(?:export\s+)?(?:async\s+)?function\s+(\w+)/, kind: "function" },
+      { regex: /^(?:export\s+)?class\s+(\w+)/, kind: "class" },
+    ];
   }
+}
+
+function findMatchingParen(code, openIdx) {
+  let depth = 0, quote = null, escaped = false;
+  for (let i = openIdx; i < code.length; i++) {
+    const ch = code[i];
+    if (escaped) { escaped = false; continue; }
+    if (quote) { if (ch === "\\") escaped = true; else if (ch === quote) quote = null; continue; }
+    if (ch === "'" || ch === '"' || ch === "`") { quote = ch; continue; }
+    if (ch === "(") depth++;
+    if (ch === ")") { depth--; if (depth === 0) return i; }
+  }
+  return -1;
 }
 
 // ═══ Language Adapters ═══
-// Each adapter adds semantic understanding on top of CST
 
 class BaseAdapter {
-  constructor() { this.language = "text"; }
-  
+  constructor(lang) { this.language = lang || "text"; }
   extractImports(code) {
-    // Regex-based import extraction
     const imports = [];
-    const patterns = {
-      javascript: [/import\s+.*?\s+from\s+['"]([^'"]+)['"]/g, /require\s*\(['"]([^'"]+)['"]\)/g],
-      python: [/from\s+(\S+)\s+import/g, /import\s+(\S+)/g],
-    };
-    const langPatterns = patterns[this.language] || patterns.javascript;
-    for (const regex of langPatterns) {
-      let m;
-      while ((m = regex.exec(code)) !== null) {
-        imports.push({ specifier: m[1], raw: m[0] });
-      }
-    }
+    const re = /import\s+.*?\s+from\s+['"]([^'"]+)['"]|require\s*\(['"]([^'"]+)['"]\)|from\s+(\S+)\s+import|import\s+(\S+)/g;
+    let m;
+    while ((m = re.exec(code)) !== null) imports.push({ specifier: m[1] || m[2] || m[3] || m[4], raw: m[0] });
     return imports;
   }
-
   extractCalls(code, symbolName) {
-    // Find function calls within a symbol body
-    const calls = [];
-    const regex = /(\w+(?:\.\w+)*)\s*\(/g;
+    const calls = new Set();
+    const re = /(\w+(?:\.\w+)*)\s*\(/g;
     let m;
-    while ((m = regex.exec(code)) !== null) {
-      const called = m[1];
-      if (called !== symbolName && !called.startsWith("console.") && !called.startsWith("Math.")) {
-        calls.push(called);
-      }
-    }
-    return [...new Set(calls)];
+    while ((m = re.exec(code)) !== null) { const c = m[1]; if (c !== symbolName) calls.add(c); }
+    return [...calls];
   }
-
   extractThrows(code) {
-    const throws = [];
-    const regex = /throw\s+(?:new\s+)?(\w+)/g;
+    const throws = new Set();
+    const re = /throw\s+(?:new\s+)?(\w+)/g;
     let m;
-    while ((m = regex.exec(code)) !== null) throws.push(m[1]);
-    return [...new Set(throws)];
+    while ((m = re.exec(code)) !== null) throws.add(m[1]);
+    return [...throws];
   }
-
   extractEffects(code) {
-    const effects = [];
-    // Database writes
-    if (/\.(?:save|insert|update|delete|create|write|persist|upsert)\s*\(/i.test(code))
-      effects.push("database-write");
-    if (/\.(?:find|get|read|query|select|fetch)\s*\(/i.test(code))
-      effects.push("database-read");
-    // Network
-    if (/\.(?:publish|send|post|put|patch)\s*\(/.test(code))
-      effects.push("network-write");
-    if (/\.(?:fetch|get|request)\s*\(/.test(code))
-      effects.push("network-read");
-    // File I/O
-    if (/(?:writeFile|createWriteStream|open\s*\([^)]*['"]w)/.test(code))
-      effects.push("filesystem-write");
-    if (/(?:readFile|createReadStream)/.test(code))
-      effects.push("filesystem-read");
-    // Process
-    if (/(?:spawn|exec|fork|subprocess)/.test(code))
-      effects.push("process-spawn");
-    return effects;
+    const e = [];
+    if (/\.(?:save|insert|update|delete|create|write|persist|upsert)\s*\(/i.test(code)) e.push("database-write");
+    if (/\.(?:publish|send|post|put|patch)\s*\(/.test(code)) e.push("network-write");
+    if (/\.(?:fetch|get|request)\s*\(/.test(code)) e.push("network-read");
+    if (/(?:writeFile|createWriteStream|open\s*\([^)]*['"]w)/.test(code)) e.push("filesystem-write");
+    if (/(?:spawn|exec|fork|subprocess)/.test(code)) e.push("process-spawn");
+    return e;
   }
 }
 
-class JavaScriptAdapter extends BaseAdapter {
-  constructor() { super(); this.language = "javascript"; }
-}
-
-class TypeScriptAdapter extends BaseAdapter {
-  constructor() { super(); this.language = "typescript"; }
-}
-
+class JavaScriptAdapter extends BaseAdapter { constructor() { super("javascript"); } }
+class TypeScriptAdapter extends BaseAdapter { constructor() { super("typescript"); } }
 class PythonAdapter extends BaseAdapter {
-  constructor() { super(); this.language = "python"; }
-  
-  extractCalls(code, symbolName) {
-    const calls = [];
-    const regex = /(\w+(?:\.\w+)*)\s*\(/g;
+  constructor() { super("python"); }
+  extractCalls(code, sym) {
+    const calls = new Set();
+    const skip = new Set(["print","len","range","str","int","list","dict","set","type","isinstance","hasattr","getattr","setattr","super","enumerate","zip","map","filter"]);
+    const re = /(\w+(?:\.\w+)*)\s*\(/g;
     let m;
-    while ((m = regex.exec(code)) !== null) {
-      const called = m[1];
-      if (!["print", "len", "range", "str", "int", "list", "dict", "set", "type", "isinstance", 
-             "hasattr", "getattr", "setattr", "super", "enumerate", "zip", "map", "filter"].includes(called)) {
-        calls.push(called);
-      }
-    }
-    return [...new Set(calls)];
+    while ((m = re.exec(code)) !== null) { if (!skip.has(m[1])) calls.add(m[1]); }
+    return [...calls];
   }
 }
 
-// ═══ Adapter registry ═══
-const adapters = {
-  javascript: JavaScriptAdapter,
-  typescript: TypeScriptAdapter,
-  tsx: TypeScriptAdapter,
-  python: PythonAdapter,
-};
+const adapters = { javascript: JavaScriptAdapter, typescript: TypeScriptAdapter, tsx: TypeScriptAdapter, python: PythonAdapter };
 
-/** Get adapter for language, falls back to BaseAdapter */
 export function getAdapter(language) {
   const Adapter = adapters[language] || BaseAdapter;
-  return new Adapter();
+  return new Adapter(language);
 }
 
-// ═══ Main API ═══
-
-/**
- * Parse a file and return structured symbols with positions
- * @returns {{ symbols: Array, language: string, imports: Array }}
- */
 export function parseFile(filePath) {
   const code = readFileSync(filePath, "utf-8");
   const language = detectLanguage(filePath);
   const parser = new RegexParser(language);
   const adapter = getAdapter(language);
-  
   const { symbols } = parser.parse(code);
   const imports = adapter.extractImports(code);
-
   return { symbols, language, imports, code };
 }
 
-/**
- * Extract semantic contract for a specific symbol
- * @returns {{ signature, effects, throws, calls, properties, confidence }}
- */
 export function extractContract(symbol, code, language) {
   const adapter = getAdapter(language || "javascript");
-  
-  // Find the symbol's body
-  const lines = code.split("\n");
-  const startLine = (symbol.startLine || 1) - 1;
-  const endLine = symbol.endLine || startLine + 1;
-  const body = lines.slice(startLine, endLine + 1).join("\n");
-
+  const body = symbol.body || "";
   const effects = adapter.extractEffects(body);
   const throws = adapter.extractThrows(body);
   const calls = adapter.extractCalls(body, symbol.name);
-
-  // Heuristic properties
-  const properties = {};
-  if (/\.(?:map|filter|reduce|forEach)\s*\(/.test(body)) properties.functionalIteration = true;
-  if (/(?:new Promise|async\s|await\s)/.test(body)) properties.async = true;
-  if (/(?:transaction|BEGIN|COMMIT|ROLLBACK)/.test(body)) properties.transactional = true;
-  if (/(?:mutex|lock|semaphore|atomic)/i.test(body)) properties.usesLocking = true;
-  if (/\.(?:id|uuid|guid)\b/.test(body)) properties.idempotent = true;
-
-  // Confidence estimation
-  const confidence = {
-    effects: effects.length > 0 ? 0.85 : 0.3,
-    throws: throws.length > 0 ? 0.9 : 0.3,
-    idempotent: properties.idempotent ? 0.65 : properties.async ? 0.4 : 0.5,
-    async: properties.async ? 0.95 : 0.95,
-  };
-
+  const props = {};
+  if (/(?:new Promise|async\s|await\s)/.test(body)) props.async = true;
+  if (/(?:transaction|BEGIN|COMMIT|ROLLBACK)/.test(body)) props.transactional = true;
+  if (/(?:mutex|lock|semaphore|atomic)/i.test(body)) props.usesLocking = true;
   return {
-    signature: symbol.signature || "",
-    visibility: symbol.name?.startsWith("_") ? "private" : "public",
-    effects,
-    throws,
-    calls,
-    properties,
-    confidence,
+    signature: symbol.signature || "", visibility: symbol.name?.startsWith("_") ? "private" : "public",
+    effects, throws, calls, properties: props,
+    confidence: { effects: effects.length > 0 ? 0.85 : 0.3, idempotent: props.transactional ? 0.5 : 0.5, async: props.async ? 0.95 : 0.95 },
+    body, startLine: symbol.startLine, endLine: symbol.endLine,
   };
 }
-
-export { detectLanguage };
