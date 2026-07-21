@@ -1,10 +1,12 @@
 // ═══ Semantic Context Packet Builder v0.3.1 ═══
 import { createSymbolId, createSymbolRevisionFromSource, createFileRevision, SessionHandleRegistry } from "../core/symbol-id.js";
+import { relative } from "path";
 import { parseFile, extractContract } from "../core/ast-engine.js";
 import { rankCandidates } from "./ranking.js";
 
-export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 8000, qualityFloor = 0.95, mode = "safe", projectRoot = ".", evidence = {} }) {
+export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 8000, qualityFloor = 0.95, mode = "safe", projectRoot = ".", evidence = {}, createSymbolIdentity } = {}) {
   const parsed = parseFile(targetFile);
+  const identity = createSymbolIdentity || ((parsed, sym) => createSymbolId({ projectRelativePath: relative(projectRoot, targetFile), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }));
   const fileRev = createFileRevision(parsed.code);
   const handles = new SessionHandleRegistry();
 
@@ -23,15 +25,15 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   // ── Layer 1: Build all contracts ──
   const contracts = [];
   for (const sym of parsed.symbols) {
-    const sid = createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
+    const sid = identity(parsed, sym);
     const c = extractContract(sym, parsed.code, parsed.language);
     const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
     const h = handles.register(sid, sym.qualifiedName, targetFile);
     contracts.push({
-      handle: h, id: sid, revision: srev, fileRevision: fileRev, kind: sym.kind, name: sym.name, qualifiedName: sym.qualifiedName,
+      handle: h, id: sid, revision: srev, fileRevision: fileRev, file: targetFile, kind: sym.kind, name: sym.name, qualifiedName: sym.qualifiedName,
       signature: sym.signature, visibility: c.visibility,
       effects: c.effects, throws: c.throws,
-      calls: c.calls.map(cn => handles.register(createSymbolId({ language: parsed.language, nodeType: "function", qualifiedName: cn, signature: "()" }), cn, targetFile)),
+      calls: c.calls.map(cn => handles.register(identity(parsed, { kind: "function", qualifiedName: cn, signature: "()" }), cn, targetFile)),
       properties: c.properties, confidence: c.confidence,
       needsSource: shouldEscalate(sym, c, task, evidence),
       risk: assessRisk(sym, c),

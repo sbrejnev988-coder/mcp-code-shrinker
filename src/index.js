@@ -29,7 +29,7 @@ const budget = new TokenBudget();
 const sessions = new Map();
 const patches = new Map(); // patchId → { contextId, edits }
 let callGraph = null;
-let validator = null;
+const validators = new Map();
 const CONFIGURED_ROOTS = (process.env.CODE_SHRINKER_ALLOWED_ROOTS || '').split(delimiter).filter(Boolean).map(p => resolve(p));
 
 function isInside(root, candidate) {
@@ -86,7 +86,7 @@ async function handleProjectScan(args) {
   if (CONFIGURED_ROOTS.length === 0) throw new Error('NO_ALLOWED_ROOT_CONFIGURED');
   const root = args.path ? await resolveInsideRoot(args.path) : CONFIGURED_ROOTS[0];
   callGraph = new CallGraph(root);
-  validator = new PatchValidator({ projectRoot: root });
+  validators.set(root, new PatchValidator({ projectRoot: root }));
   const stats = callGraph.scan({ exclude: args.exclude });
   return ok({ status: "scanned", ...stats, root });
 }
@@ -147,7 +147,7 @@ async function handleSymbolContext(args) {
 
 async function handleContextCreate(args) {
   const tf = await resolveInsideRoot(args.targetFile);
-  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {} });
+  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: CONFIGURED_ROOTS[0] || "." });
   if (callGraph && args.task?.target) {
     const callers = callGraph.callers(tf, args.task.target);
     const tests = callGraph.getTests(tf, args.task.target);
@@ -238,21 +238,22 @@ async function handlePatchValidate(args) {
   if (proposed.expectedFileRevision && currentFileRev !== proposed.expectedFileRevision) return err('STALE_FILE_SINCE_CONTEXT');
   // Init validator from configured root that contains this file
   const projectRoot = CONFIGURED_ROOTS.find(r => isInside(r, filePath)) || resolve('.');
-  if (!validator) validator = new PatchValidator({ projectRoot });
+  let vtor = validators.get(projectRoot); if (!vtor) { vtor = new PatchValidator({ projectRoot }); validators.set(projectRoot, vtor); }
   const fileHash = existsSync(filePath) ? createFileRevision(readFileSync(filePath, "utf-8")) : null;
-  const result = validator.validate({ patchId: args.patchId, filePath, originalHash: fileHash, edits: proposed.edits });
+  const result = vtor.validate({ patchId: args.patchId, filePath, originalHash: fileHash, edits: proposed.edits });
   return ok(result);
 }
 
 async function handlePatchApply(args) {
-  if (!validator) return err('Validator not initialized');
+  const vRoot = CONFIGURED_ROOTS[0] || resolve('.');
+  let vtor = validators.get(vRoot);
+  if (!vtor) { vtor = new PatchValidator({ projectRoot: vRoot }); validators.set(vRoot, vtor); }
   if (!args.patchId) return err('patchId required');
-  const validation = validator.results.get(args.patchId);
+  const validation = vtor.results.get(args.patchId);
   if (!validation) return err('Validation not found — run patch.validate first');
-  // Use filePath from validation record, not from model
   const proposed = patches.get(args.patchId);
   const fp = proposed?.filePath ? await resolveInsideRoot(proposed.filePath) : resolve('.');
-  const result = validator.apply({ patchId: args.patchId, filePath: fp });
+  const result = vtor.apply({ patchId: args.patchId, filePath: fp });
   return ok(result);
 }
 
