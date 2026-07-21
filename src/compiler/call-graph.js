@@ -90,7 +90,7 @@ export class CallGraph {
     try {
       const parsed = parseFile(absPath);
       const symbols = parsed.symbols.map(sym => {
-        const id = createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
+        const id = createSymbolId({ projectRelativePath: relative(this.root, absPath), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
         const body = sym.body || "";
         const contract = extractContract(sym, parsed.code, parsed.language);
         return { ...sym, id, file: absPath, contract };

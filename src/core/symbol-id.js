@@ -30,8 +30,8 @@ function normalizeSubtree(node) {
 /**
  * Create stable symbol identity (survives neighbor edits)
  */
-export function createSymbolId({ language, nodeType, qualifiedName, signature, declarationOrdinal = 0 }) {
-  const key = [language, nodeType, qualifiedName, normalizeSignature(signature), declarationOrdinal > 0 ? `#${declarationOrdinal}` : ""].join("|");
+export function createSymbolId({ projectRelativePath = "", language, nodeType, qualifiedName, signature, declarationOrdinal = 0 }) {
+  const key = [(projectRelativePath || "").replace(/\\/g, "/"), language, nodeType, qualifiedName, normalizeSignature(signature), declarationOrdinal > 0 ? `#${declarationOrdinal}` : ""].join("|");
   return `sym_${shaShort(key)}`;
 }
 

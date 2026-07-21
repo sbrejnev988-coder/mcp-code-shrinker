@@ -115,10 +115,19 @@ export class PatchValidator {
 
       // Store validated hash for integrity check
       result.validatedPatchedHash = createFileRevision(readFileSync(sandboxFile, "utf-8"));
-      result.status = "valid";
+      // Determine validation completeness
+      let validationState = 'valid';
+      const criticalChecks = result.steps.filter(s => ['parse','typecheck','lint','tests'].includes(s.step));
+      const skipped = criticalChecks.filter(s => s.status === 'skipped').length;
+      const failed = criticalChecks.filter(s => s.status === 'failed').length;
+      if (failed > 0) validationState = 'invalid';
+      else if (skipped === criticalChecks.length) validationState = 'inconclusive';
+      else if (skipped > 0) validationState = 'inconclusive';
+      result.validationState = validationState;
+      result.status = validationState;
       result.sandboxDir = sandboxDir;
       result.summary = { steps: result.steps.length, passed: result.steps.filter(s => s.status === "passed").length, duration_ms: Date.now() - result.started };
-      result.patchReady = true;
+      result.patchReady = validationState === 'valid';
     } catch (e) {
       return this._fail(result, "INTERNAL_ERROR", { message: e.message });
     }
@@ -167,7 +176,8 @@ export class PatchValidator {
     writeFileSync(tmpPath, patchedCode, { mode });
     try { const fd = openSync(tmpPath, "r+"); fdatasyncSync(fd); closeSync(fd); } catch {}
     try { cpSync(absPath, bakPath); } catch {}
-    try { renameSync(tmpPath, absPath); } catch { writeFileSync(absPath, patchedCode); }
+    try { renameSync(tmpPath, absPath); }
+    catch { return { status: 'rejected', reason: 'ATOMIC_RENAME_FAILED', backupPath: bakPath, tmpPath }; }
     try { rmSync(tmpPath, { force: true }); } catch {}
 
     const newHash = createFileRevision(patchedCode);

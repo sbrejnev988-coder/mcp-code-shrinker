@@ -124,7 +124,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   packet.aliases = handles.toAliasMap();
 
   // ── FIXED: qualityFloor actually applied ──
-  const hasTargetSource = sources.length > 0;
+  const hasTargetSource = sources.some(source => targetContract && source.id === targetContract.id);
   const hasContracts = selContracts.length > 0;
   const hasTests = !!evidence.tests;
   let estQuality = 0.5;

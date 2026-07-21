@@ -29,7 +29,7 @@ const sessions = new Map();
 const patches = new Map(); // patchId → { contextId, edits }
 let callGraph = null;
 let validator = null;
-const CONFIGURED_ROOTS = (process.env.CODE_SHRINKER_ALLOWED_ROOTS || '').split(':').filter(Boolean).map(p => resolve(p));
+const CONFIGURED_ROOTS = (process.env.CODE_SHRINKER_ALLOWED_ROOTS || '').split(delimiter).filter(Boolean).map(p => resolve(p));
 
 function isInside(root, candidate) {
   const rel = relative(root, candidate);
@@ -83,7 +83,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 async function handleProjectScan(args) {
   const root = CONFIGURED_ROOTS[0] || resolve(args.path || ".");
-  if (args.path) { const scanPath = resolve(args.path); if (!CONFIGURED_ROOTS.some(r => isInside(r, scanPath))) throw new Error("scan path outside configured roots"); }
+  if (args.path) { const scanPath = resolve(args.path); if (CONFIGURED_ROOTS.length > 0 && !CONFIGURED_ROOTS.some(r => isInside(r, scanPath))) throw new Error('scan path outside configured roots'); } else if (CONFIGURED_ROOTS.length === 0) { throw new Error('NO_ALLOWED_ROOT_CONFIGURED. Set CODE_SHRINKER_ALLOWED_ROOTS.'); }
   callGraph = new CallGraph(root);
   validator = new PatchValidator({ projectRoot: root });
   const stats = callGraph.scan({ exclude: args.exclude });
@@ -106,7 +106,7 @@ async function handleFileContracts(args) {
   const contracts = parsed.symbols.map(sym => {
     const c = extractContract(sym, parsed.code, parsed.language);
     return {
-      id: createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }),
+      id: createSymbolId({ projectRelativePath: relative(".", fp), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }),
       revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
       handle: `@${sym.qualifiedName}`, kind: sym.kind, signature: c.signature, visibility: c.visibility,
       effects: c.effects, throws: c.throws, calls: c.calls, properties: c.properties, confidence: c.confidence,
@@ -123,7 +123,7 @@ async function handleSymbolSource(args) {
   if (!sym) return err(`Symbol not found: ${args.symbol}`);
   const c = extractContract(sym, parsed.code, parsed.language);
   const result = {
-    id: createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }),
+    id: createSymbolId({ projectRelativePath: relative(".", fp), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }),
     revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
     fileRevision: createFileRevision(parsed.code), handle: `@${sym.qualifiedName}`, kind: sym.kind, language: parsed.language,
     range: [sym.startLine, sym.endLine],
@@ -173,7 +173,7 @@ async function handleContextExpand(args) {
       const sym = parsed.symbols.find(s => s.qualifiedName === req.symbol || s.name === req.symbol);
       if (!sym) { added.sources.push({ symbol: req.symbol, status: "not_found" }); continue; }
       const c = extractContract(sym, parsed.code, parsed.language);
-      const sid = createSymbolId({ language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
+      const sid = createSymbolId({ projectRelativePath: relative(".", fp), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature });
       const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
       const h = packet.handles.register(sid, sym.qualifiedName, fp);
       if (!packet.packet.contracts.find(x => x.id === sid)) {
