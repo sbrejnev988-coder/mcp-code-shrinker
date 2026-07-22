@@ -62,6 +62,15 @@ const toolDefs = [
   { name: "project.watch_stop", title: "Stop Watch", description: "Stop the incremental watcher.", inputSchema: { type: "object", properties: {} } },
   { name: "project.watch_status", title: "Watch Status", description: "Current watcher state: files, symbols, change log.", inputSchema: { type: "object", properties: {} } },
   { name: "project.snapshot", title: "Project Snapshot", description: "Take a snapshot: files, symbols, entrypoints.", inputSchema: { type: "object", properties: { path: { type: "string" } } } },
+  { name: "artifact.put", title: "Store Artifact", description: "Content-addressed storage with SHA-256, compression, TTL. Returns artifact ID.", inputSchema: { type: "object", properties: { content: { type: "string", description: "Content to store (text or base64)" }, contentType: { type: "string", default: "text/plain" }, compress: { type: "boolean", default: true }, ttl: { type: "number", description: "TTL in seconds (0 = forever)" }, pin: { type: "boolean" }, sensitive: { type: "boolean" }, redacted: { type: "boolean" }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } },
+  { name: "artifact.get", title: "Get Artifact", description: "Retrieve artifact by ID. Returns content as text.", inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"] } },
+  { name: "artifact.get_chunk", title: "Get Chunk", description: "Read one chunk of a large artifact.", inputSchema: { type: "object", properties: { artifactId: { type: "string" }, chunkIndex: { type: "number", default: 0 } }, required: ["artifactId"] } },
+  { name: "artifact.copy_text", title: "Copy Text", description: "Self-contained copyable artifact content.", inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"] } },
+  { name: "artifact.pin", title: "Pin Artifact", description: "Pin/unpin (pinned survive GC).", inputSchema: { type: "object", properties: { artifactId: { type: "string" }, pin: { type: "boolean", default: true } }, required: ["artifactId"] } },
+  { name: "artifact.delete", title: "Delete Artifact", description: "Delete artifact and its files.", inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"] } },
+  { name: "artifact.list", title: "List Artifacts", description: "List all artifacts with metadata.", inputSchema: { type: "object", properties: { pinned: { type: "boolean" }, tag: { type: "string" }, limit: { type: "number", default: 50 } } } },
+  { name: "artifact.stats", title: "Artifact Stats", description: "Storage statistics (count, size, compression).", inputSchema: { type: "object", properties: {} } },
+  { name: "artifact.gc", title: "Garbage Collect", description: "Remove expired unpinned artifacts.", inputSchema: { type: "object", properties: {} } },
   { name: "project.changed_symbols", title: "Changed Symbols", description: "Symbols changed since last scan/watch.", inputSchema: { type: "object", properties: { limit: { type: "number", default: 50 } } } },
   { name: "context.create", title: "Create Context Packet", description: "Build L0-L3 packet with ranking + quality check.", inputSchema: { type: "object", properties: { task: { type: "object" }, targetFile: { type: "string" }, tokenBudget: { type: "number" }, qualityFloor: { type: "number" }, mode: { type: "string", enum: ["safe","balanced","aggressive"] }, projectRoot: { type: "string" }, evidence: { type: "object" } }, required: ["task","targetFile"] } },
   { name: "context.expand", title: "Expand Context", description: "FIXED: path validated, loads symbols into packet.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, requests: { type: "array", items: { type: "object", properties: { symbol: { type: "string" }, filePath: { type: "string" }, view: { type: "string", enum: ["source","contract"] }, reason: { type: "string" } }, required: ["symbol"] } } }, required: ["contextId","requests"] } },
@@ -81,6 +90,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "project.watch_stop": return handleWatchStop(args);
       case "project.watch_status": return handleWatchStatus(args);
       case "project.snapshot": return handleSnapshot(args);
+      case "artifact.put": return handleArtifactPut(args);
+      case "artifact.get": return handleArtifactGet(args);
+      case "artifact.get_chunk": return handleArtifactGetChunk(args);
+      case "artifact.copy_text": return handleArtifactCopyText(args);
+      case "artifact.pin": return handleArtifactPin(args);
+      case "artifact.delete": return handleArtifactDelete(args);
+      case "artifact.list": return handleArtifactList(args);
+      case "artifact.stats": return handleArtifactStats(args);
+      case "artifact.gc": return handleArtifactGC(args);
       case "project.changed_symbols": return handleChangedSymbols(args);
       case "project.scan": return handleProjectScan(args);
       case "project.map": return handleProjectMap(args);
@@ -120,6 +138,39 @@ function handleSnapshot(args) {
   return ok(idx.snapshot());
 }
 
+function handleArtifactPut(args) {
+  try { const r = artifactPut(args.content, { mimeType: args.contentType || "text/plain", compress: args.compress !== false, ttl: args.ttl || 0, pin: args.pin || false, sensitive: args.sensitive || false, redacted: args.redacted || false, tags: args.tags || [] }); return ok(r); }
+  catch (e) { return err(e.message); }
+}
+function handleArtifactGet(args) {
+  const r = artifactGet(args.artifactId, { asText: true });
+  return r ? ok({ content: r }) : err("Artifact not found");
+}
+function handleArtifactGetChunk(args) {
+  const r = artifactGetChunk(args.artifactId, args.chunkIndex || 0);
+  return r ? ok(r) : err("Chunk not found");
+}
+function handleArtifactCopyText(args) {
+  const r = artifactCopyText(args.artifactId);
+  return r ? ok({ copyText: r, artifactId: args.artifactId }) : err("Artifact not found");
+}
+function handleArtifactPin(args) {
+  const r = artifactPin(args.artifactId, args.pin !== false);
+  return r ? ok(r) : err("Artifact not found");
+}
+function handleArtifactDelete(args) {
+  try { const r = artifactDelete(args.artifactId); return r ? ok(r) : err("Artifact not found"); }
+  catch (e) { return err(e.message); }
+}
+function handleArtifactList(args) {
+  return ok({ artifacts: artifactList({ pinned: args.pinned, tag: args.tag, limit: args.limit || 50 }) });
+}
+function handleArtifactStats(args) {
+  return ok(artifactStats());
+}
+function handleArtifactGC(args) {
+  return ok(artifactGC());
+}
 function handleChangedSymbols(args) {
   if (!incIndex) return ok([]);
   return ok(incIndex.changedSymbols().slice(0, args.limit || 50));
