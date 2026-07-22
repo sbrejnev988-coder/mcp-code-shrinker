@@ -58,6 +58,11 @@ const toolDefs = [
   { name: "file.contracts", title: "File Contracts (L1)", description: "Layer 1: contracts for all symbols. FIXED: includes full body ranges.", inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
   { name: "symbol.source", title: "Symbol Source (L2)", description: "EXACT source — FIXED: full function body now extracted.", inputSchema: { type: "object", properties: { filePath: { type: "string" }, symbol: { type: "string" }, view: { type: "string", enum: ["source","contract","reference"] } }, required: ["filePath","symbol"] } },
   { name: "symbol.context", title: "Symbol Context", description: "Callers/callees/tests. FIXED: edges now built.", inputSchema: { type: "object", properties: { filePath: { type: "string" }, symbol: { type: "string" }, what: { type: "array", items: { type: "string", enum: ["callers","callees","tests","sideEffects"] } } }, required: ["filePath","symbol"] } },
+  { name: "project.watch_start", title: "Start Watch", description: "Start incremental file watcher (daemon mode).", inputSchema: { type: "object", properties: { path: { type: "string" }, interval: { type: "number", description: "Poll interval ms (default 5000)" }, exclude: { type: "array", items: { type: "string" } } } } },
+  { name: "project.watch_stop", title: "Stop Watch", description: "Stop the incremental watcher.", inputSchema: { type: "object", properties: {} } },
+  { name: "project.watch_status", title: "Watch Status", description: "Current watcher state: files, symbols, change log.", inputSchema: { type: "object", properties: {} } },
+  { name: "project.snapshot", title: "Project Snapshot", description: "Take a snapshot: files, symbols, entrypoints.", inputSchema: { type: "object", properties: { path: { type: "string" } } } },
+  { name: "project.changed_symbols", title: "Changed Symbols", description: "Symbols changed since last scan/watch.", inputSchema: { type: "object", properties: { limit: { type: "number", default: 50 } } } },
   { name: "context.create", title: "Create Context Packet", description: "Build L0-L3 packet with ranking + quality check.", inputSchema: { type: "object", properties: { task: { type: "object" }, targetFile: { type: "string" }, tokenBudget: { type: "number" }, qualityFloor: { type: "number" }, mode: { type: "string", enum: ["safe","balanced","aggressive"] }, projectRoot: { type: "string" }, evidence: { type: "object" } }, required: ["task","targetFile"] } },
   { name: "context.expand", title: "Expand Context", description: "FIXED: path validated, loads symbols into packet.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, requests: { type: "array", items: { type: "object", properties: { symbol: { type: "string" }, filePath: { type: "string" }, view: { type: "string", enum: ["source","contract"] }, reason: { type: "string" } }, required: ["symbol"] } } }, required: ["contextId","requests"] } },
   { name: "context.inspect", title: "Inspect Loss", description: "Loss manifest + quality.", inputSchema: { type: "object", properties: { contextId: { type: "string" } }, required: ["contextId"] } },
@@ -72,6 +77,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args = {} } = req.params;
   try {
     switch (name) {
+      case "project.watch_start": return handleWatchStart(args);
+      case "project.watch_stop": return handleWatchStop(args);
+      case "project.watch_status": return handleWatchStatus(args);
+      case "project.snapshot": return handleSnapshot(args);
+      case "project.changed_symbols": return handleChangedSymbols(args);
       case "project.scan": return handleProjectScan(args);
       case "project.map": return handleProjectMap(args);
       case "file.contracts": return handleFileContracts(args);
@@ -87,6 +97,33 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   } catch (e) { return err(`${name}: ${e.message}`); }
 });
+
+function handleWatchStart(args) {
+  if (!incIndex) incIndex = new IncrementalIndex(args.path || ".");
+  const result = incIndex.start({ interval: args.interval || 5000, exclude: args.exclude });
+  return ok(result);
+}
+
+function handleWatchStop(args) {
+  if (!incIndex) return ok({ watching: false });
+  return ok(incIndex.stop());
+}
+
+function handleWatchStatus(args) {
+  if (!incIndex) return ok({ watching: false, files: 0 });
+  return ok(incIndex.status());
+}
+
+function handleSnapshot(args) {
+  const idx = incIndex || new IncrementalIndex(args.path || ".");
+  if (!incIndex) { idx.graph.scan(); incIndex = idx; }
+  return ok(idx.snapshot());
+}
+
+function handleChangedSymbols(args) {
+  if (!incIndex) return ok([]);
+  return ok(incIndex.changedSymbols().slice(0, args.limit || 50));
+}
 
 async function handleProjectScan(args) {
   if (CONFIGURED_ROOTS.length === 0) throw new Error('NO_ALLOWED_ROOT_CONFIGURED');
