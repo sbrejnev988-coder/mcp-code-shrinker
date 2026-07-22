@@ -254,7 +254,8 @@ export function parseFile(filePath) {
   const adapter = getAdapter(language);
   const { symbols } = parser.parse(code);
   const imports = adapter.extractImports(code);
-  return { symbols, language, imports, code };
+    const meta = parserMeta("enhanced-regex", 0.85, [], false);
+  return { symbols, language, imports, code, parser: meta };
 }
 
 export function extractContract(symbol, code, language) {
@@ -274,3 +275,23 @@ export function extractContract(symbol, code, language) {
     body, startLine: symbol.startLine, endLine: symbol.endLine,
   };
 }
+
+// ═══ v0.4.0: Parser metadata for every parse result ═══
+export const PARSER_VERSION = "0.4.0";
+export function parserMeta(backend, confidence = 0.85, syntaxErrors = [], fallback = false) {
+  return { backend, version: PARSER_VERSION, confidence, syntaxErrors, fallback };
+}
+
+// Override RegexParser.parse to include parser metadata in result
+const _originalParse = RegexParser.prototype.parse;
+RegexParser.prototype.parse = function(code) {
+  const result = _originalParse.call(this, code);
+  // Wrap symbols-only result into { symbols, parser } if not already wrapped
+  if (Array.isArray(result)) {
+    return { symbols: result, parser: parserMeta("enhanced-regex", 0.85, [], false) };
+  }
+  if (!result.parser) {
+    result.parser = parserMeta("enhanced-regex", 0.85, [], false);
+  }
+  return result;
+};
