@@ -253,6 +253,9 @@ async function handleContextCreate(args) {
   packet._targetFile = tf;
   packet._qualityFloor = args.qualityFloor ?? 0.95;
   packet._projectRoot = rootForFile(tf);
+  packet._repositoryId = args.task?.repositoryId || "";
+  packet._commitSha = args.task?.commitSha || "";
+  packet._targetSymbolId = args.task?.target || "";
   packet._targetFileRevision = createFileRevision(readFileSync(tf, 'utf-8'));
   
   // P2: Quality auto-recovery — single retry with expanded budget
@@ -274,6 +277,9 @@ async function handleContextCreate(args) {
           recovered._targetFileRevision = packet._targetFileRevision;
           recovered._qualityFloor = args.qualityFloor ?? 0.95;
           recovered._projectRoot = rootForFile(tf);
+          recovered._repositoryId = args.task?.repositoryId || "";
+          recovered._commitSha = args.task?.commitSha || "";
+          recovered._targetSymbolId = args.task?.target || "";
           recovered.qualityRecovery = {
             attempted: true,
             succeeded: true,
@@ -356,7 +362,7 @@ async function handleContextExpand(args) {
   const sources = packet.packet.sources || [];
   const contracts = packet.packet.contracts || [];
   const evidence = packet.packet.evidence || [];
-  const hasTarget = sources.length > 0;
+  const hasTarget = sources.length > 0 && (packet._targetSymbolId ? sources.some(s => s.id === packet._targetSymbolId) : true);
   const hasContracts = contracts.length > 0;
   const hasEvidence = evidence.length > 0;
   const omittedCount = (packet.omitted || []).length;
@@ -370,6 +376,14 @@ async function handleContextExpand(args) {
   packet.estimatedQuality = Math.round(estQ * 100) / 100;
   packet.qualitySatisfied = packet.estimatedQuality >= (packet._qualityFloor || 0.95);
   
+  // Update loss manifest
+  if (packet.loss) {
+    packet.loss.removed.symbols = Math.max(0, (packet.loss.removed.symbols || 0) - sources.length);
+    packet.loss.removedSymbolIds = (packet.loss.removedSymbolIds || []).filter(id => !sources.some(s => s.id === id));
+    packet.loss.removed.bodies = Math.max(0, (packet.loss.removed.bodies || 0) - sources.length);
+    packet.loss.preserved.targetSource = hasTarget;
+  }
+  
   // Recalculate risk
   if (!hasTarget) packet.risk = "high";
   else if (packet.loss?.removed?.bodies > packet.layers?.contracts * 0.3) packet.risk = "medium";
@@ -382,7 +396,7 @@ async function handleContextExpand(args) {
   packet.coverage_manifest = {
     protocol_version: 1,
     packet_id: packet.contextId,
-    repository_id: "", commit_sha: "",
+    repository_id: packet._repositoryId || "", commit_sha: packet._commitSha || "",
     covered: [],
     created_at: Math.floor(Date.now() / 1000)
   };
@@ -398,7 +412,7 @@ async function handleContextExpand(args) {
   for (const contract of contracts) {
     const hash = createHash("sha256").update(JSON.stringify(contract)).digest("hex");
     packet.coverage_manifest.covered.push({
-      kind: "contract", file_path: contract.file || "",
+      kind: "contract", file_path: contract.file ? (packet._projectRoot !== "." ? require("path").relative(packet._projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
       symbol_id: contract.id, revision: contract.revision || "",
       content_hash: `sha256:${hash}`,
       token_count: estimateTokens(JSON.stringify(contract), "json")
@@ -414,7 +428,15 @@ async function handleContextExpand(args) {
   }
   
   sessions.set(args.contextId, packet);
-  return ok({ contextId: args.contextId, fromRevision: oldRev, revision: packet.revision, added, tokensAdded: added.tokensAdded });
+  return ok({
+    contextId: args.contextId, fromRevision: oldRev, revision: packet.revision,
+    added, tokensAdded: added.tokensAdded,
+    coverage_manifest: packet.coverage_manifest,
+    estimatedQuality: packet.estimatedQuality,
+    qualitySatisfied: packet.qualitySatisfied,
+    loss: packet.loss ? { removed: packet.loss.removed, preserved: packet.loss.preserved, risk: packet.loss.risk } : null,
+    risk: packet.risk
+  });
 }
 
 async function handleContextInspect(args) {
