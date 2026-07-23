@@ -147,10 +147,13 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
       hints: []
     };
     // Auto-recovery hints: what would improve quality
-    if (!packet.source?.size) packet.qualityRecovery.hints.push("add_target_source");
-    if (!packet.contracts?.size) packet.qualityRecovery.hints.push("add_contracts");
-    if (!packet.tests?.size && task.taskType === "bugfix") packet.qualityRecovery.hints.push("add_tests");
-    if (packet.omitted?.length > packet.source?.size * 2) packet.qualityRecovery.hints.push("reduce_omissions");
+    const sourceCount = (packet.packet.sources || []).length;
+    const contractCount = (packet.packet.contracts || []).length;
+    const hasTests = (packet.packet.evidence || []).some(e => e.type === "tests");
+    if (sourceCount === 0) packet.qualityRecovery.hints.push("add_target_source");
+    if (contractCount === 0) packet.qualityRecovery.hints.push("add_contracts");
+    if (!hasTests && task.taskType === "bugfix") packet.qualityRecovery.hints.push("add_tests");
+    if ((packet.omitted?.length || 0) > sourceCount * 2) packet.qualityRecovery.hints.push("reduce_omissions");
   }
   else if (packet.loss.removed.bodies > 0 && !hasTargetSource) packet.risk = "high";
   else if (packet.loss.removed.bodies > packet.layers.contracts * 0.3) packet.risk = "medium";
@@ -159,55 +162,51 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   packet.loss.risk = packet.risk;
   
   // P1: Coverage manifest for Memory Wiki deduplication
+  const sources = packet.packet.sources || [];
+  const contracts = packet.packet.contracts || [];
+  const evidence = packet.packet.evidence || [];
+  
   packet.coverage_manifest = {
     protocol_version: 1,
-    packet_id: packet.packetId || `ctx-${Date.now()}`,
+    packet_id: packet.contextId || `ctx-${Date.now()}`,
     repository_id: task.repositoryId || "",
     commit_sha: task.commitSha || "",
     covered: [],
     created_at: Math.floor(Date.now() / 1000)
   };
   
-  // Add exact sources to coverage
-  for (const [symbolId, source] of Object.entries(packet.source || {})) {
+  for (const src of sources) {
+    const hash = require("crypto").createHash("sha256").update(src.source || "").digest("hex").slice(0, 16);
     packet.coverage_manifest.covered.push({
       kind: "exact_source",
-      symbol_id: symbolId,
-      revision: source.revision || "",
-      content_hash: source.hash || "",
-      token_count: source.tokenCount || 0
+      file_path: src.file || "",
+      symbol_id: src.id,
+      revision: src.expectedRevision || "",
+      content_hash: `sha256:${hash}`,
+      token_count: estimateTokens(src.source || "", "code")
     });
   }
   
-  // Add contracts
-  for (const [symbolId, contract] of Object.entries(packet.contracts || {})) {
+  for (const contract of contracts) {
+    const serialized = JSON.stringify(contract);
+    const hash = require("crypto").createHash("sha256").update(serialized).digest("hex").slice(0, 16);
     packet.coverage_manifest.covered.push({
       kind: "contract",
-      symbol_id: symbolId,
+      file_path: contract.file || "",
+      symbol_id: contract.id,
       revision: contract.revision || "",
-      content_hash: contract.hash || "",
-      token_count: contract.tokenCount || 0
+      content_hash: `sha256:${hash}`,
+      token_count: estimateTokens(serialized, "json")
     });
   }
   
-  // Add diagnostics
-  for (const diag of (packet.diagnostics || [])) {
-    if (diag.hash) {
-      packet.coverage_manifest.covered.push({
-        kind: "diagnostic",
-        diagnostic_hash: diag.hash,
-        token_count: diag.tokenCount || 0
-      });
-    }
-  }
-  
-  // Add tests
-  for (const [testId, test] of Object.entries(packet.tests || {})) {
+  for (const ev of evidence) {
+    const serialized = JSON.stringify(ev.data);
+    const hash = require("crypto").createHash("sha256").update(serialized).digest("hex").slice(0, 16);
     packet.coverage_manifest.covered.push({
-      kind: "test",
-      symbol_id: testId,
-      content_hash: test.hash || "",
-      token_count: test.tokenCount || 0
+      kind: ev.type === "tests" ? "test" : "diagnostic",
+      content_hash: `sha256:${hash}`,
+      token_count: estimateTokens(serialized, "diagnostic")
     });
   }
 
