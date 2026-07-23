@@ -18,6 +18,8 @@ const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 import { resolve, relative, isAbsolute, delimiter } from "node:path";
 import { randomUUID } from "crypto";
 import { buildContextPacket } from "./compiler/packet-builder.js";
+import { IncrementalIndex, incIndex } from "./compiler/incremental-index.js";
+import { artifactPut, artifactGet, artifactCopyText, artifactPin, artifactDelete } from "./core/artifact-store.js";
 import { parseFile, extractContract } from "./core/ast-engine.js";
 import { createSymbolId, createSymbolRevisionFromSource, createFileRevision } from "./core/symbol-id.js";
 import { TokenBudget } from "./core/token-budget.js";
@@ -288,7 +290,16 @@ async function handleContextCreate(args) {
   }
   
   sessions.set(packet.contextId, packet);
-  return ok({ contextId: packet.contextId, revision: packet.revision, task: packet.task, layers: packet.layers, tokens: packet.tokens, risk: packet.risk, qualitySatisfied: packet.qualitySatisfied, estimatedQuality: packet.estimatedQuality, loss: { removed: packet.loss.removed, preserved: packet.loss.preserved, risk: packet.loss.risk }, aliases: packet.aliases, packet: packet.packet, omitted: packet.omitted });
+  return ok({
+    contextId: packet.contextId, revision: packet.revision,
+    task: packet.task, layers: packet.layers, tokens: packet.tokens,
+    risk: packet.risk, qualitySatisfied: packet.qualitySatisfied,
+    estimatedQuality: packet.estimatedQuality,
+    loss: { removed: packet.loss.removed, preserved: packet.loss.preserved, risk: packet.loss.risk },
+    aliases: packet.aliases, packet: packet.packet, omitted: packet.omitted,
+    coverage_manifest: packet.coverage_manifest || null,
+    qualityRecovery: packet.qualityRecovery || null
+  });
 }
 
 async function handleContextExpand(args) {
