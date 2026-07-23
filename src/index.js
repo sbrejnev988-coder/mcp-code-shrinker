@@ -347,6 +347,33 @@ async function handleContextExpand(args) {
   }
   packet.revision++;
   packet.tokens += added.tokensAdded;
+  
+  // P1: Recalculate quality and manifest after expand
+  try {
+    const sourceCount = (packet.packet.sources || []).length;
+    const contractCount = (packet.packet.contracts || []).length;
+    const evidenceCount = (packet.packet.evidence || []).length;
+    const omittedCount = (packet.omitted || []).length;
+    const hasTarget = sourceCount > 0;
+    const hasContracts = contractCount > 0;
+    const hasEvidence = evidenceCount > 0;
+    
+    // Recalculate estimated quality
+    let estQ = 0.5;
+    if (hasTarget) estQ += 0.25;
+    if (hasContracts) estQ += 0.15;
+    if (hasEvidence) estQ += 0.10;
+    if (omittedCount === 0) estQ = Math.min(estQ + 0.05, 1.0);
+    packet.estimatedQuality = Math.round(estQ * 100) / 100;
+    packet.qualitySatisfied = packet.estimatedQuality >= (packet._qualityFloor || 0.95);
+    
+    // Recalculate risk
+    if (!hasTarget) packet.risk = "high";
+    else if (packet.loss?.removed?.bodies > packet.layers?.contracts * 0.3) packet.risk = "medium";
+    else packet.risk = "low";
+    if (packet.loss) packet.loss.risk = packet.risk;
+  } catch(e) {}
+  
   sessions.set(args.contextId, packet);
   return ok({ contextId: args.contextId, fromRevision: oldRev, revision: packet.revision, added, tokensAdded: added.tokensAdded });
 }
