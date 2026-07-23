@@ -139,7 +139,19 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   packet.qualitySatisfied = packet.estimatedQuality >= qualityFloor;
 
   // ── Risk calculation ──
-  if (!packet.qualitySatisfied) packet.risk = "high";
+  if (!packet.qualitySatisfied) {
+    packet.risk = "high";
+    packet.qualityRecovery = {
+      attempted: false,
+      reason: estQuality < 0.85 ? "missing_critical_sources" : "quality_below_floor",
+      hints: []
+    };
+    // Auto-recovery hints: what would improve quality
+    if (!packet.source?.size) packet.qualityRecovery.hints.push("add_target_source");
+    if (!packet.contracts?.size) packet.qualityRecovery.hints.push("add_contracts");
+    if (!packet.tests?.size && task.taskType === "bugfix") packet.qualityRecovery.hints.push("add_tests");
+    if (packet.omitted?.length > packet.source?.size * 2) packet.qualityRecovery.hints.push("reduce_omissions");
+  }
   else if (packet.loss.removed.bodies > 0 && !hasTargetSource) packet.risk = "high";
   else if (packet.loss.removed.bodies > packet.layers.contracts * 0.3) packet.risk = "medium";
   else packet.risk = "low";
