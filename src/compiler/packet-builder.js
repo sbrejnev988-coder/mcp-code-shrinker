@@ -102,7 +102,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     
     if (includeSource && c.body) {
       sources.push({
-        handle: c.handle, id: c.id, expectedRevision: c.revision,
+        handle: c.handle, id: c.id, file: targetFile, expectedRevision: c.revision,
         language: parsed.language, source: c.body,
         related: { callers: [], tests: [] },
       });
