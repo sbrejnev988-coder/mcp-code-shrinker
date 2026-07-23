@@ -157,6 +157,59 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   else packet.risk = "low";
   
   packet.loss.risk = packet.risk;
+  
+  // P1: Coverage manifest for Memory Wiki deduplication
+  packet.coverage_manifest = {
+    protocol_version: 1,
+    packet_id: packet.packetId || `ctx-${Date.now()}`,
+    repository_id: task.repositoryId || "",
+    commit_sha: task.commitSha || "",
+    covered: [],
+    created_at: Math.floor(Date.now() / 1000)
+  };
+  
+  // Add exact sources to coverage
+  for (const [symbolId, source] of Object.entries(packet.source || {})) {
+    packet.coverage_manifest.covered.push({
+      kind: "exact_source",
+      symbol_id: symbolId,
+      revision: source.revision || "",
+      content_hash: source.hash || "",
+      token_count: source.tokenCount || 0
+    });
+  }
+  
+  // Add contracts
+  for (const [symbolId, contract] of Object.entries(packet.contracts || {})) {
+    packet.coverage_manifest.covered.push({
+      kind: "contract",
+      symbol_id: symbolId,
+      revision: contract.revision || "",
+      content_hash: contract.hash || "",
+      token_count: contract.tokenCount || 0
+    });
+  }
+  
+  // Add diagnostics
+  for (const diag of (packet.diagnostics || [])) {
+    if (diag.hash) {
+      packet.coverage_manifest.covered.push({
+        kind: "diagnostic",
+        diagnostic_hash: diag.hash,
+        token_count: diag.tokenCount || 0
+      });
+    }
+  }
+  
+  // Add tests
+  for (const [testId, test] of Object.entries(packet.tests || {})) {
+    packet.coverage_manifest.covered.push({
+      kind: "test",
+      symbol_id: testId,
+      content_hash: test.hash || "",
+      token_count: test.tokenCount || 0
+    });
+  }
 
   return packet;
 }
