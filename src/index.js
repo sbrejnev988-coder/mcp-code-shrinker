@@ -18,8 +18,9 @@ const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 import { resolve, relative, isAbsolute, delimiter } from "node:path";
 import { randomUUID } from "crypto";
 import { buildContextPacket } from "./compiler/packet-builder.js";
-import { IncrementalIndex, incIndex } from "./compiler/incremental-index.js";
-import { artifactPut, artifactGet, artifactCopyText, artifactPin, artifactDelete } from "./core/artifact-store.js";
+import { IncrementalIndex } from "./compiler/incremental-index.js";
+let incIndex = null;
+import { artifactPut, artifactGet, artifactGetChunk, artifactCopyText, artifactPin, artifactDelete, artifactList, artifactStats, artifactGC } from "./core/artifact-store.js";
 import { parseFile, extractContract } from "./core/ast-engine.js";
 import { createSymbolId, createSymbolRevisionFromSource, createFileRevision } from "./core/symbol-id.js";
 import { TokenBudget } from "./core/token-budget.js";
@@ -412,7 +413,7 @@ async function handleContextExpand(args) {
   for (const contract of contracts) {
     const hash = createHash("sha256").update(JSON.stringify(contract)).digest("hex");
     packet.coverage_manifest.covered.push({
-      kind: "contract", file_path: contract.file ? (packet._projectRoot !== "." ? require("path").relative(packet._projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
+      kind: "contract", file_path: contract.file ? (packet._projectRoot !== "." ? relative(packet._projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
       symbol_id: contract.id, revision: contract.revision || "",
       content_hash: `sha256:${hash}`,
       token_count: estimateTokens(JSON.stringify(contract), "json")
