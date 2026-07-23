@@ -250,6 +250,43 @@ async function handleContextCreate(args) {
   }
   packet._targetFile = tf;
   packet._targetFileRevision = createFileRevision(readFileSync(tf, 'utf-8'));
+  
+  // P2: Quality auto-recovery — single retry with expanded budget
+  if (!packet.qualitySatisfied && args.allowRecovery !== false) {
+    const recoveryPlan = [...(packet.qualityRecovery?.hints || [])];
+    if (recoveryPlan.length > 0) {
+      try {
+        const recovered = await buildContextPacket({
+          ...args,
+          targetFile: tf,
+          tokenBudget: (args.tokenBudget || 8000) * 1.5,  // Expand budget by 50%
+          qualityFloor: args.qualityFloor ?? 0.95,
+          mode: args.mode || "safe",
+          evidence: args.evidence || {},
+          projectRoot: rootForFile(tf),
+        });
+        if (recovered.qualitySatisfied && recovered.estimatedQuality > packet.estimatedQuality) {
+          recovered._targetFile = tf;
+          recovered._targetFileRevision = packet._targetFileRevision;
+          packet.qualityRecovery = {
+            attempted: true,
+            succeeded: true,
+            actions: recoveryPlan,
+            previousQuality: packet.estimatedQuality,
+            recoveredQuality: recovered.estimatedQuality,
+          };
+          packet = recovered;
+        } else {
+          packet.qualityRecovery.attempted = true;
+          packet.qualityRecovery.succeeded = false;
+          packet.qualityRecovery.actions = recoveryPlan;
+        }
+      } catch (e) {
+        packet.qualityRecovery.attempted = false;
+      }
+    }
+  }
+  
   sessions.set(packet.contextId, packet);
   return ok({ contextId: packet.contextId, revision: packet.revision, task: packet.task, layers: packet.layers, tokens: packet.tokens, risk: packet.risk, qualitySatisfied: packet.qualitySatisfied, estimatedQuality: packet.estimatedQuality, loss: { removed: packet.loss.removed, preserved: packet.loss.preserved, risk: packet.loss.risk }, aliases: packet.aliases, packet: packet.packet, omitted: packet.omitted });
 }
