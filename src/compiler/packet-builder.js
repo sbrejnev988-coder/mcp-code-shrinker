@@ -162,6 +162,12 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   
   packet.loss.risk = packet.risk;
   
+  // P1: Quality auto-recovery — single retry if quality not satisfied
+  if (!packet.qualitySatisfied && packet.qualityRecovery) {
+    packet.qualityRecovery.attempted = false;
+    packet.qualityRecovery.plan = [...packet.qualityRecovery.hints];
+  }
+  
   // P1: Coverage manifest for Memory Wiki deduplication
   const coveredSources = packet.packet.sources || [];
   const coveredContracts = packet.packet.contracts || [];
@@ -177,7 +183,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   };
   
   for (const src of coveredSources) {
-    const hash = createHash("sha256").update(src.source || "").digest("hex").slice(0, 16);
+    const hash = createHash("sha256").update(src.source || "").digest("hex");
     packet.coverage_manifest.covered.push({
       kind: "exact_source",
       file_path: src.file || "",
@@ -190,7 +196,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   
   for (const contract of coveredContracts) {
     const serialized = JSON.stringify(contract);
-    const hash = createHash("sha256").update(serialized).digest("hex").slice(0, 16);
+    const hash = createHash("sha256").update(serialized).digest("hex");
     packet.coverage_manifest.covered.push({
       kind: "contract",
       file_path: contract.file || "",
@@ -203,7 +209,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   
   for (const ev of coveredEvidence) {
     const serialized = JSON.stringify(ev.data);
-    const hash = createHash("sha256").update(serialized).digest("hex").slice(0, 16);
+    const hash = createHash("sha256").update(serialized).digest("hex");
     packet.coverage_manifest.covered.push({
       kind: ev.type === "tests" ? "test" : "diagnostic",
       content_hash: `sha256:${hash}`,
