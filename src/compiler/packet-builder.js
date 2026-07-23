@@ -102,7 +102,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     
     if (includeSource && c.body) {
       sources.push({
-        handle: c.handle, id: c.id, file: targetFile, expectedRevision: c.revision,
+        handle: c.handle, id: c.id, file: (projectRoot !== "." ? relative(projectRoot, targetFile).replace(/\\/g, "/") : targetFile), expectedRevision: c.revision,
         language: parsed.language, source: c.body,
         related: { callers: [], tests: [] },
       });
@@ -186,7 +186,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     const hash = createHash("sha256").update(src.source || "").digest("hex");
     packet.coverage_manifest.covered.push({
       kind: "exact_source",
-      file_path: src.file || "",
+      file_path: src.file ? (projectRoot !== "." ? relative(projectRoot, src.file).replace(/\\/g, "/") : src.file) : "",
       symbol_id: src.id,
       revision: src.expectedRevision || "",
       content_hash: `sha256:${hash}`,
@@ -199,7 +199,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     const hash = createHash("sha256").update(serialized).digest("hex");
     packet.coverage_manifest.covered.push({
       kind: "contract",
-      file_path: contract.file || "",
+      file_path: contract.file ? (projectRoot !== "." ? relative(projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
       symbol_id: contract.id,
       revision: contract.revision || "",
       content_hash: `sha256:${hash}`,
