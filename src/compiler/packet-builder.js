@@ -1,5 +1,6 @@
 // ═══ Semantic Context Packet Builder v0.3.1 ═══
 import { createSymbolId, createSymbolRevisionFromSource, createFileRevision, SessionHandleRegistry } from "../core/symbol-id.js";
+import { createHash } from "node:crypto";
 import { relative } from "path";
 import { parseFile, extractContract } from "../core/ast-engine.js";
 import { rankCandidates } from "./ranking.js";
@@ -162,9 +163,9 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   packet.loss.risk = packet.risk;
   
   // P1: Coverage manifest for Memory Wiki deduplication
-  const sources = packet.packet.sources || [];
-  const contracts = packet.packet.contracts || [];
-  const evidence = packet.packet.evidence || [];
+  const coveredSources = packet.packet.sources || [];
+  const coveredContracts = packet.packet.contracts || [];
+  const coveredEvidence = packet.packet.evidence || [];
   
   packet.coverage_manifest = {
     protocol_version: 1,
@@ -175,8 +176,8 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     created_at: Math.floor(Date.now() / 1000)
   };
   
-  for (const src of sources) {
-    const hash = require("crypto").createHash("sha256").update(src.source || "").digest("hex").slice(0, 16);
+  for (const src of coveredSources) {
+    const hash = createHash("sha256").update(src.source || "").digest("hex").slice(0, 16);
     packet.coverage_manifest.covered.push({
       kind: "exact_source",
       file_path: src.file || "",
@@ -187,9 +188,9 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     });
   }
   
-  for (const contract of contracts) {
+  for (const contract of coveredContracts) {
     const serialized = JSON.stringify(contract);
-    const hash = require("crypto").createHash("sha256").update(serialized).digest("hex").slice(0, 16);
+    const hash = createHash("sha256").update(serialized).digest("hex").slice(0, 16);
     packet.coverage_manifest.covered.push({
       kind: "contract",
       file_path: contract.file || "",
@@ -200,9 +201,9 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     });
   }
   
-  for (const ev of evidence) {
+  for (const ev of coveredEvidence) {
     const serialized = JSON.stringify(ev.data);
-    const hash = require("crypto").createHash("sha256").update(serialized).digest("hex").slice(0, 16);
+    const hash = createHash("sha256").update(serialized).digest("hex").slice(0, 16);
     packet.coverage_manifest.covered.push({
       kind: ev.type === "tests" ? "test" : "diagnostic",
       content_hash: `sha256:${hash}`,
