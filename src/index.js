@@ -270,21 +270,31 @@ async function handleContextCreate(args) {
         if (recovered.qualitySatisfied && recovered.estimatedQuality > packet.estimatedQuality) {
           recovered._targetFile = tf;
           recovered._targetFileRevision = packet._targetFileRevision;
-          packet.qualityRecovery = {
+          recovered.qualityRecovery = {
             attempted: true,
             succeeded: true,
             actions: recoveryPlan,
-            previousQuality: packet.estimatedQuality,
-            recoveredQuality: recovered.estimatedQuality,
+            qualityBefore: packet.estimatedQuality,
+            qualityAfter: recovered.estimatedQuality,
+            budgetBefore: args.tokenBudget || 8000,
+            budgetAfter: (args.tokenBudget || 8000) * 1.5
           };
           packet = recovered;
         } else {
-          packet.qualityRecovery.attempted = true;
-          packet.qualityRecovery.succeeded = false;
-          packet.qualityRecovery.actions = recoveryPlan;
+          packet.qualityRecovery = {
+            attempted: true,
+            succeeded: false,
+            actions: recoveryPlan,
+            qualityBefore: packet.estimatedQuality,
+            qualityAfter: recovered.estimatedQuality
+          };
         }
       } catch (e) {
-        packet.qualityRecovery.attempted = false;
+        packet.qualityRecovery = {
+          attempted: true,
+          succeeded: false,
+          error: { type: e.name || 'Error', message: e.message || String(e) }
+        };
       }
     }
   }
