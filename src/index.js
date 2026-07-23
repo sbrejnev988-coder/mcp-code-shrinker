@@ -251,6 +251,8 @@ async function handleContextCreate(args) {
     if (tests.length) packet.packet.relatedTests = tests;
   }
   packet._targetFile = tf;
+  packet._qualityFloor = args.qualityFloor ?? 0.95;
+  packet._projectRoot = rootForFile(tf);
   packet._targetFileRevision = createFileRevision(readFileSync(tf, 'utf-8'));
   
   // P2: Quality auto-recovery — single retry with expanded budget
@@ -270,6 +272,8 @@ async function handleContextCreate(args) {
         if (recovered.qualitySatisfied && recovered.estimatedQuality > packet.estimatedQuality) {
           recovered._targetFile = tf;
           recovered._targetFileRevision = packet._targetFileRevision;
+          recovered._qualityFloor = args.qualityFloor ?? 0.95;
+          recovered._projectRoot = rootForFile(tf);
           recovered.qualityRecovery = {
             attempted: true,
             succeeded: true,
@@ -348,31 +352,66 @@ async function handleContextExpand(args) {
   packet.revision++;
   packet.tokens += added.tokensAdded;
   
-  // P1: Recalculate quality and manifest after expand
-  try {
-    const sourceCount = (packet.packet.sources || []).length;
-    const contractCount = (packet.packet.contracts || []).length;
-    const evidenceCount = (packet.packet.evidence || []).length;
-    const omittedCount = (packet.omitted || []).length;
-    const hasTarget = sourceCount > 0;
-    const hasContracts = contractCount > 0;
-    const hasEvidence = evidenceCount > 0;
-    
-    // Recalculate estimated quality
-    let estQ = 0.5;
-    if (hasTarget) estQ += 0.25;
-    if (hasContracts) estQ += 0.15;
-    if (hasEvidence) estQ += 0.10;
-    if (omittedCount === 0) estQ = Math.min(estQ + 0.05, 1.0);
-    packet.estimatedQuality = Math.round(estQ * 100) / 100;
-    packet.qualitySatisfied = packet.estimatedQuality >= (packet._qualityFloor || 0.95);
-    
-    // Recalculate risk
-    if (!hasTarget) packet.risk = "high";
-    else if (packet.loss?.removed?.bodies > packet.layers?.contracts * 0.3) packet.risk = "medium";
-    else packet.risk = "low";
-    if (packet.loss) packet.loss.risk = packet.risk;
-  } catch(e) {}
+  // Build coverage manifest for expanded packet
+  const sources = packet.packet.sources || [];
+  const contracts = packet.packet.contracts || [];
+  const evidence = packet.packet.evidence || [];
+  const hasTarget = sources.length > 0;
+  const hasContracts = contracts.length > 0;
+  const hasEvidence = evidence.length > 0;
+  const omittedCount = (packet.omitted || []).length;
+  
+  // Recalculate estimated quality
+  let estQ = 0.5;
+  if (hasTarget) estQ += 0.25;
+  if (hasContracts) estQ += 0.15;
+  if (hasEvidence) estQ += 0.10;
+  if (omittedCount === 0) estQ = Math.min(estQ + 0.05, 1.0);
+  packet.estimatedQuality = Math.round(estQ * 100) / 100;
+  packet.qualitySatisfied = packet.estimatedQuality >= (packet._qualityFloor || 0.95);
+  
+  // Recalculate risk
+  if (!hasTarget) packet.risk = "high";
+  else if (packet.loss?.removed?.bodies > packet.layers?.contracts * 0.3) packet.risk = "medium";
+  else packet.risk = "low";
+  if (packet.loss) packet.loss.risk = packet.risk;
+  
+  // Rebuild coverage manifest
+  const projectRoot = packet._projectRoot || ".";
+  const { createHash } = await import("node:crypto");
+  packet.coverage_manifest = {
+    protocol_version: 1,
+    packet_id: packet.contextId,
+    repository_id: "", commit_sha: "",
+    covered: [],
+    created_at: Math.floor(Date.now() / 1000)
+  };
+  for (const src of sources) {
+    const hash = createHash("sha256").update(src.source || "").digest("hex");
+    packet.coverage_manifest.covered.push({
+      kind: "exact_source", file_path: src.file || "",
+      symbol_id: src.id, revision: src.expectedRevision || "",
+      content_hash: `sha256:${hash}`,
+      token_count: estimateTokens(src.source || "", "code")
+    });
+  }
+  for (const contract of contracts) {
+    const hash = createHash("sha256").update(JSON.stringify(contract)).digest("hex");
+    packet.coverage_manifest.covered.push({
+      kind: "contract", file_path: contract.file || "",
+      symbol_id: contract.id, revision: contract.revision || "",
+      content_hash: `sha256:${hash}`,
+      token_count: estimateTokens(JSON.stringify(contract), "json")
+    });
+  }
+  for (const ev of evidence) {
+    const hash = createHash("sha256").update(JSON.stringify(ev.data)).digest("hex");
+    packet.coverage_manifest.covered.push({
+      kind: ev.type === "tests" ? "test" : "diagnostic",
+      content_hash: `sha256:${hash}`,
+      token_count: estimateTokens(JSON.stringify(ev.data), "diagnostic")
+    });
+  }
   
   sessions.set(args.contextId, packet);
   return ok({ contextId: args.contextId, fromRevision: oldRev, revision: packet.revision, added, tokensAdded: added.tokensAdded });
