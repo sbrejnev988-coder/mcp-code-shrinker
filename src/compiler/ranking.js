@@ -89,9 +89,9 @@ export function rankCandidates(candidates, task, opts = {}) {
  */
 function estimateTokens(item) {
   let tokens = 20; // base overhead
-  if (item.signature) tokens += item.signature.length / 3;
-  if (item.body) tokens += item.body.length / 3;
-  if (item.effects?.length) tokens += item.effects.join(" ").length / 3;
+  if (item.signature) tokens += Math.ceil(item.signature.length * 0.40);
+  if (item.body) tokens += Math.ceil(item.body.length * 0.40);
+  if (item.effects?.length) tokens += Math.ceil(item.effects.join(" ").length * 0.55);
   if (item.calls?.length) tokens += item.calls.length * 5;
   if (item.throws?.length) tokens += item.throws.length * 5;
   return Math.max(10, Math.round(tokens));

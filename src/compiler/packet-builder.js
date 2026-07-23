@@ -20,7 +20,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   };
 
   // ── Layer 0 ──
-  packet.tokens += estimateJsons(JSON.stringify(packet.packet.project));
+  packet.tokens += estimateTokens(JSON.stringify(packet.packet.project));
 
   // ── Layer 1: Build all contracts ──
   const contracts = [];
@@ -54,7 +54,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     c.qualifiedName?.includes(task.target) || c.name?.includes(task.target) || c.handle?.includes(task.target));
   if (targetContract) {
     selectedIds.add(targetContract.id);
-    const st = estimateJsons(JSON.stringify({ handle: targetContract.handle, id: targetContract.id, revision: targetContract.revision, source: targetContract.body }));
+    const st = estimateTokens(JSON.stringify({ handle: targetContract.handle, id: targetContract.id, revision: targetContract.revision, source: targetContract.body }));
     used += Math.min(st, alloc.sources);
   }
 
@@ -65,9 +65,9 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     // FIXED: aggressive mode includes FEWER sources, not more
     const includeSource = c.id === targetContract?.id || c.needsSource || (mode === "safe" && c.risk >= 2);
     
-    let cost = estimateJsons(JSON.stringify({ ...c, body: undefined }));
+    let cost = estimateTokens(JSON.stringify({ ...c, body: undefined }));
     if (includeSource && c.body) {
-      cost += estimateJsons(c.body);
+      cost += estimateTokens(c.body);
     }
     
     if (used + cost > alloc.total) {
@@ -122,7 +122,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
   if (evidence.stackTrace) { packet.packet.evidence.push({ type: "stackTrace", data: evidence.stackTrace }); packet.layers.evidence++; packet.loss.preserved.errorPaths = true; }
   if (evidence.diagnostics) { packet.packet.evidence.push({ type: "diagnostics", data: evidence.diagnostics }); packet.layers.evidence++; }
 
-  packet.tokens = used + estimateJsons(JSON.stringify(packet.packet.evidence));
+  packet.tokens = used + estimateTokens(JSON.stringify(packet.packet.evidence));
   packet.aliases = handles.toAliasMap();
 
   // ── FIXED: qualityFloor actually applied ──
@@ -173,4 +173,6 @@ function allocate(total, mode) {
   return { project: total * m[0] | 0, contracts: total * m[1] | 0, sources: total * m[2] | 0, total };
 }
 
-function estimateJsons(text) { return Math.ceil(String(text).length / 1.3); }
+function estimateTokens(text, contentType = "json") {
+  return Math.ceil(String(text).length * { text: 0.75, code: 0.40, json: 0.55, tool_schema: 0.60, diagnostic: 0.65 }[contentType] || 0.70);
+}

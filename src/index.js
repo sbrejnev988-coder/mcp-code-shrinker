@@ -352,10 +352,19 @@ async function handlePatchApply(args) {
   return ok(result);
 }
 
-function ok(d) { return { content: [{ type: "text", text: JSON.stringify(d, null, 2) }], structuredContent: d, isError: false }; }
+function ok(d) { return { content: [{ type: "text", text: JSON.stringify(d) }], isError: false }; }
 function err(m) { return { content: [{ type: "text", text: m }], isError: true }; }
 function symId(root, filePath, parsed, sym) { return createSymbolId({ projectRelativePath: relative(root || '.', filePath), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }); }
-function estimateTokens(t) { return Math.ceil(String(t).length / 1.3); }
+function estimateTokens(t, contentType = "text") {
+  // Uses model-aware TokenBudget when available, falls back to estimated ratio
+  if (typeof TokenBudget !== "undefined" && TokenBudget.countText) {
+    return TokenBudget.countText(String(t), contentType);
+  }
+  // Fallback coefficients by content type
+  const ratios = { text: 0.75, code: 0.40, json: 0.55, tool_schema: 0.60, diagnostic: 0.65 };
+  const ratio = ratios[contentType] || 0.70;
+  return Math.ceil(String(t).length * ratio);
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
