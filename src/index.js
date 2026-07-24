@@ -295,18 +295,17 @@ async function handleContextCreate(args) {
   const slot = requireIndex(repoId);
   const tf = await resolveInsideRoot(args.targetFile);
   if (!isInside(slot.root, tf)) throw new Error(`TARGET_OUTSIDE_REPOSITORY: ${tf} not in ${slot.root}`);
-  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: rootForFile(tf) });
-  const cgSlot = (args.task?.repositoryId) ? indexes.get(args.task.repositoryId) : null;
-  if (cgSlot?.callGraph && args.task?.target) {
-    const callers = cgSlot.callGraph.callers(tf, args.task.target);
-    const tests = cgSlot.callGraph.getTests(tf, args.task.target);
+  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: slot.root });
+  if (slot.callGraph && args.task?.target) {
+    const callers = slot.callGraph.callers(tf, args.task.target);
+    const tests = slot.callGraph.getTests(tf, args.task.target);
     if (callers.length) packet.packet.callers = callers;
     if (tests.length) packet.packet.relatedTests = tests;
   }
   packet._targetFile = tf;
   packet._qualityFloor = args.qualityFloor ?? 0.95;
-  packet._projectRoot = rootForFile(tf);
-  packet._repositoryId = args.task?.repositoryId || "";
+  packet._projectRoot = slot.root;
+  packet._repositoryId = repoId;
   packet._commitSha = args.task?.commitSha || "";
   // Resolve target to stable ID for expand comparisons
   const targetContract = packet.packet.contracts?.find(c => c.handle === args.task?.target || c.signature?.includes(args.task?.target));
@@ -327,14 +326,14 @@ async function handleContextCreate(args) {
           qualityFloor: args.qualityFloor ?? 0.95,
           mode: args.mode || "safe",
           evidence: args.evidence || {},
-          projectRoot: rootForFile(tf),
+          projectRoot: slot.root,
         });
         if (recovered.qualitySatisfied && recovered.estimatedQuality > packet.estimatedQuality) {
           recovered._targetFile = tf;
           recovered._targetFileRevision = packet._targetFileRevision;
           recovered._qualityFloor = args.qualityFloor ?? 0.95;
-          recovered._projectRoot = rootForFile(tf);
-          recovered._repositoryId = args.task?.repositoryId || "";
+          recovered._projectRoot = slot.root;
+          recovered._repositoryId = repoId;
           recovered._commitSha = args.task?.commitSha || "";
           const recTargetContract = recovered.packet.contracts?.find(c => c.handle === args.task?.target || c.signature?.includes(args.task?.target));
           const recTargetSource = recovered.packet.sources?.find(s => s.handle === args.task?.target);
@@ -386,7 +385,8 @@ async function handleContextExpand(args) {
   const packet = sessions.get(args.contextId);
   if (!packet) return err(`Context not found: ${args.contextId}`);
   const repoId = String(packet._repositoryId || "").trim();
-  const slot = repoId ? indexes.get(repoId) : null;
+  if (!repoId) throw new Error("CONTEXT_HAS_NO_REPOSITORY_ID");
+  const slot = requireIndex(repoId);
   const added = { sources: [], contracts: [], tokensAdded: 0 };
   const oldRev = packet.revision;
   for (const req of (args.requests || [])) {
@@ -394,7 +394,7 @@ async function handleContextExpand(args) {
     let fp = req.filePath;
     if (fp) {
       fp = await resolveInsideRoot(fp);
-      if (slot && !isInside(slot.root, fp)) throw new Error(`CROSS_REPOSITORY_EXPAND: ${fp} outside ${slot.root}`);
+      if (!isInside(slot.root, fp)) throw new Error(`CROSS_REPOSITORY_EXPAND: ${fp} outside ${slot.root}`);
     } else if (packet._targetFile) fp = packet._targetFile; else continue;
     try {
       const parsed = parseFile(fp);
