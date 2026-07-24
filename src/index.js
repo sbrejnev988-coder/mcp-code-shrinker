@@ -256,7 +256,11 @@ async function handleContextCreate(args) {
   packet._projectRoot = rootForFile(tf);
   packet._repositoryId = args.task?.repositoryId || "";
   packet._commitSha = args.task?.commitSha || "";
-  packet._targetSymbolId = args.task?.target || "";
+  // Resolve target to stable ID for expand comparisons
+  const targetContract = packet.packet.contracts?.find(c => c.handle === args.task?.target || c.signature?.includes(args.task?.target));
+  const targetSource = packet.packet.sources?.find(s => s.handle === args.task?.target);
+  packet._targetSymbolId = targetSource?.id || targetContract?.id || args.task?.target || "";
+  packet._targetSymbolName = args.task?.target || "";
   packet._targetFileRevision = createFileRevision(readFileSync(tf, 'utf-8'));
   
   // P2: Quality auto-recovery — single retry with expanded budget
@@ -280,7 +284,10 @@ async function handleContextCreate(args) {
           recovered._projectRoot = rootForFile(tf);
           recovered._repositoryId = args.task?.repositoryId || "";
           recovered._commitSha = args.task?.commitSha || "";
-          recovered._targetSymbolId = args.task?.target || "";
+          const recTargetContract = recovered.packet.contracts?.find(c => c.handle === args.task?.target || c.signature?.includes(args.task?.target));
+          const recTargetSource = recovered.packet.sources?.find(s => s.handle === args.task?.target);
+          recovered._targetSymbolId = recTargetSource?.id || recTargetContract?.id || args.task?.target || "";
+          recovered._targetSymbolName = args.task?.target || "";
           recovered.qualityRecovery = {
             attempted: true,
             succeeded: true,
@@ -377,12 +384,16 @@ async function handleContextExpand(args) {
   packet.estimatedQuality = Math.round(estQ * 100) / 100;
   packet.qualitySatisfied = packet.estimatedQuality >= (packet._qualityFloor || 0.95);
   
-  // Update loss manifest — only subtract newly added IDs (not all sources)
+  // Update loss manifest — subtract only successfully loaded IDs
   if (packet.loss) {
-    const newlyRestoredIds = new Set((added.sources || []).map(s => s.handle));
+    const newlyRestoredIds = new Set(
+      (added.sources || [])
+        .filter(s => s.status === "loaded" && s.id)
+        .map(s => s.id)
+    );
     packet.loss.removedSymbolIds = (packet.loss.removedSymbolIds || []).filter(id => !newlyRestoredIds.has(id));
     packet.loss.removed.symbols = packet.loss.removedSymbolIds.length;
-    packet.loss.removed.bodies = Math.max(0, packet.loss.removed.bodies - (added.tokensAdded > 0 ? 1 : 0));
+    packet.loss.removed.bodies = packet.loss.removedSymbolIds.length;
     packet.loss.preserved.targetSource = hasTarget;
   }
   
