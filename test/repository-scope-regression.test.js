@@ -3,28 +3,57 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createSymbolId } from "../src/core/symbol-id.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(resolve(here, "../src/index.js"), "utf8");
 
-test("watch_stop preserves repository binding", () => {
+test("watch_stop preserves the repository binding", () => {
   assert.doesNotMatch(source, /indexes\.delete\(repoId\)/);
-  assert.match(source, /indexes\.set\(repoId, slot\)/);
+  assert.match(
+    source,
+    /handleWatchStop[\s\S]*slot\.index\.stop\(\)[\s\S]*repository_id:\s*repoId/,
+  );
 });
 
-test("expand validates implicit target and refreshes target id", () => {
-  assert.match(source, /resolveInsideRoot\(packet\._targetFile\)/);
+test("context.expand validates implicit target against the repository slot", () => {
+  assert.match(
+    source,
+    /else if \(packet\._targetFile\)\s*\{[\s\S]*resolveInsideRoot\(packet\._targetFile\)[\s\S]*isInside\(slot\.root,\s*fp\)/,
+  );
   assert.match(source, /packet\._targetSymbolId\s*=\s*sid/);
 });
 
-test("patch proposal and validator are repository scoped", () => {
-  assert.match(source, /repositoryId:\s*packet\._repositoryId/);
-  assert.match(source, /repositoryRoot:\s*packet\._projectRoot/);
-  assert.match(source, /requireIndex\(proposed\.repositoryId\)/);
-  assert.match(source, /PATCH_REPOSITORY_BINDING_CHANGED/);
+test("patch proposal, validation and application remain repository scoped", () => {
+  assert.match(source, /const repositoryId\s*=\s*String\(packet\._repositoryId/);
+  assert.match(source, /repositoryRoot:\s*repositorySlot\.root/);
+  assert.ok(
+    (source.match(/requireIndex\(proposed\.repositoryId\)/g) || []).length >= 2,
+  );
+  assert.ok((source.match(/PATCH_REPOSITORY_MISMATCH/g) || []).length >= 2);
 });
 
-test("stable symbol path is NFC and slash canonical", () => {
-  assert.match(source, /\.normalize\("NFC"\)/);
-  assert.match(source, /\.replace\(\/\\\\\\\\\/g, "\/"\)/);
+test("createSymbolId treats NFC/NFD and slash variants identically", () => {
+  const common = {
+    language: "javascript",
+    nodeType: "function",
+    qualifiedName: "café.run",
+    signature: "run()",
+  };
+
+  const nfc = createSymbolId({
+    ...common,
+    projectRelativePath: "src/café.js",
+  });
+  const nfd = createSymbolId({
+    ...common,
+    projectRelativePath: "src/cafe\u0301.js",
+  });
+  const windows = createSymbolId({
+    ...common,
+    projectRelativePath: "src\\café.js",
+  });
+
+  assert.equal(nfc, nfd);
+  assert.equal(nfc, windows);
 });
