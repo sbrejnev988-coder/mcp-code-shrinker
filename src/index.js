@@ -94,7 +94,27 @@ const toolDefs = [
   { name: "patch.apply", title: "Apply Patch", description: "FIXED: real hash re-check works now.", inputSchema: { type: "object", properties: { patchId: { type: "string" } }, required: ["patchId"], additionalProperties: false } },
 ];
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefs.map(t => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema, annotations: { readOnlyHint: !t.name.startsWith("patch.a"), destructiveHint: t.name === "patch.apply" } })) }));
+const MUTATING_TOOLS = new Set([
+  "project.scan", "project.watch_start", "project.watch_stop", "project.snapshot",
+  "artifact.put", "artifact.pin", "artifact.delete", "artifact.gc",
+  "context.create", "context.expand", "patch.propose", "patch.validate", "patch.apply",
+]);
+const DESTRUCTIVE_TOOLS = new Set(["artifact.delete", "artifact.gc", "patch.apply"]);
+function annotationsForTool(name) {
+  return {
+    readOnlyHint: !MUTATING_TOOLS.has(name),
+    destructiveHint: DESTRUCTIVE_TOOLS.has(name),
+  };
+}
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: toolDefs.map(t => ({
+    name: t.name,
+    title: t.title,
+    description: t.description,
+    inputSchema: t.inputSchema,
+    annotations: annotationsForTool(t.name),
+  })),
+}));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args = {} } = req.params;
@@ -149,9 +169,8 @@ async function handleWatchStart(args) {
 async function handleWatchStop(args) {
   const repoId = requireRepositoryId(args);
   const slot = requireIndex(repoId);
-  const result = slot.index.stop();
-  indexes.delete(repoId);
-  return ok({ status: "stopped", repository_id: repoId, root: slot.root });
+  slot.index.stop();
+  return ok({ status: "stopped", watching: false, repository_id: repoId, root: slot.root });
 }
 
 function handleWatchStatus(args) {
@@ -299,7 +318,7 @@ async function handleContextCreate(args) {
   if (legacyRepositoryId && legacyRepositoryId !== repoId) {
     throw new Error(`REPOSITORY_ID_MISMATCH: top-level ${repoId} vs task ${legacyRepositoryId}`);
   }
-  const packet = await buildContextPacket({ ...args, repositoryId: repoId,  targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: slot.root });
+  let packet = await buildContextPacket({ ...args, repositoryId: repoId,  targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: slot.root });
   if (slot.callGraph && args.task?.target) {
     const callers = slot.callGraph.callers(tf, args.task.target);
     const tests = slot.callGraph.getTests(tf, args.task.target);
@@ -418,7 +437,11 @@ async function handleContextExpand(args) {
         added.tokensAdded += estimateTokens(c.body);
         packet.layers.sources++;
       }
-      // Remove from omitted if present
+      if (req.symbol === packet._targetSymbolName && sid) {
+    packet._targetSymbolId = sid;
+  }
+
+  // Remove from omitted if present
       packet.omitted = packet.omitted.filter(o => o.id !== sid);
     } catch (e) { added.sources.push({ symbol: req.symbol, status: "error", error: e.message }); }
   }
@@ -531,7 +554,22 @@ async function handlePatchPropose(args) {
     }
   }
   const patchId = "patch_" + randomUUID().slice(0, 12);
-  const ref = { contextId: args.contextId, contextRevision: packet.revision, filePath: packet._targetFile, expectedFileRevision: packet._targetFileRevision, edits: args.edits.map(e => ({...e})), editsHash: createFileRevision(JSON.stringify(args.edits)) };
+  const repositoryId = String(packet._repositoryId || "").trim();
+  if (!repositoryId) return err("CONTEXT_HAS_NO_REPOSITORY_ID");
+  const repositorySlot = requireIndex(repositoryId);
+  if (repositorySlot.root !== packet._projectRoot || !isInside(repositorySlot.root, packet._targetFile)) {
+    return err("PATCH_REPOSITORY_MISMATCH");
+  }
+  const ref = {
+    contextId: args.contextId,
+    contextRevision: packet.revision,
+    repositoryId,
+    repositoryRoot: repositorySlot.root,
+    filePath: packet._targetFile,
+    expectedFileRevision: packet._targetFileRevision,
+    edits: args.edits.map(e => ({ ...e })),
+    editsHash: createFileRevision(JSON.stringify(args.edits)),
+  };
   patches.set(patchId, ref);
   return ok({ patchId, contextId: args.contextId, edits: args.edits.map(e => ({ ...e, status: "proposed" })), note: "Use patch.validate with this patchId next." });
 }
@@ -544,13 +582,15 @@ async function handlePatchValidate(args) {
   if (!ctx) return err('CONTEXT_EXPIRED');
   if (ctx.revision !== proposed.contextRevision) return err('STALE_CONTEXT');
   if (createFileRevision(JSON.stringify(proposed.edits)) !== proposed.editsHash) return err('PATCH_TAMPERED');
+  const slot = requireIndex(proposed.repositoryId);
+  if (slot.root !== proposed.repositoryRoot) return err('PATCH_REPOSITORY_MISMATCH');
   const filePath = await resolveInsideRoot(proposed.filePath);
-  // Check file hasn\'t changed since context.create
+  if (!isInside(slot.root, filePath)) return err('PATCH_REPOSITORY_MISMATCH');
+
+  // Check file hasn't changed since context.create
   const currentFileRev = createFileRevision(readFileSync(filePath, 'utf-8'));
   if (proposed.expectedFileRevision && currentFileRev !== proposed.expectedFileRevision) return err('STALE_FILE_SINCE_CONTEXT');
-  // Init validator from configured root that contains this file
-  const projectRoot = rootForFile(filePath);
-  let vtor; for (const s of indexes.values()) { if (s.validator && s.root === projectRoot) { vtor = s.validator; break; } } if (!vtor) { vtor = new PatchValidator({ projectRoot }); }
+  const vtor = slot.validator || (slot.validator = new PatchValidator({ projectRoot: slot.root }));
   const fileHash = existsSync(filePath) ? createFileRevision(readFileSync(filePath, "utf-8")) : null;
   const result = vtor.validate({ patchId: args.patchId, filePath, originalHash: fileHash, edits: proposed.edits });
   return ok(result);
@@ -560,9 +600,11 @@ async function handlePatchApply(args) {
   if (!args.patchId) return err('patchId required');
   const proposed = patches.get(args.patchId);
   if (!proposed) return err('UNKNOWN_PATCH_ID');
+  const slot = requireIndex(proposed.repositoryId);
+  if (slot.root !== proposed.repositoryRoot) return err('PATCH_REPOSITORY_MISMATCH');
   const fp = await resolveInsideRoot(proposed.filePath);
-  const vRoot = CONFIGURED_ROOTS.find(r => isInside(r, fp)) || CONFIGURED_ROOTS[0] || resolve('.');
-  let vtor; for (const s of indexes.values()) { if (s.validator && s.root === vRoot) { vtor = s.validator; break; } } if (!vtor) { vtor = new PatchValidator({ projectRoot: vRoot }); }
+  if (!isInside(slot.root, fp)) return err('PATCH_REPOSITORY_MISMATCH');
+  const vtor = slot.validator || (slot.validator = new PatchValidator({ projectRoot: slot.root }));
   const validation = vtor.results.get(args.patchId);
   if (!validation) return err('Validation not found — run patch.validate first');
   const result = vtor.apply({ patchId: args.patchId, filePath: fp });
