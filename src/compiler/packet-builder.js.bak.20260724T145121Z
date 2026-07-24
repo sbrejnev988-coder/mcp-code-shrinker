@@ -1,42 +1,13 @@
 // ═══ Semantic Context Packet Builder v0.3.1 ═══
 import { createSymbolId, createSymbolRevisionFromSource, createFileRevision, SessionHandleRegistry } from "../core/symbol-id.js";
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { relative } from "path";
 import { parseFile, extractContract } from "../core/ast-engine.js";
 import { rankCandidates } from "./ranking.js";
 
-
-
-export function canonicalRepoPath(projectRoot, inputPath) {
-  const root = resolve(projectRoot);
-  const absolute = isAbsolute(inputPath)
-    ? resolve(inputPath)
-    : resolve(root, inputPath);
-  const repoPath = relative(root, absolute);
-
-  if (
-    repoPath === ".." ||
-    repoPath.startsWith(`..${sep}`) ||
-    isAbsolute(repoPath)
-  ) {
-    throw new Error(`PATH_OUTSIDE_REPOSITORY: ${inputPath}`);
-  }
-
-  const canonical = repoPath
-    .split(sep)
-    .join("/")
-    .normalize("NFC")
-    .replace(/^\.\/+/, "");
-
-  if (!canonical || canonical === ".") {
-    throw new Error(`INVALID_REPOSITORY_PATH: ${inputPath}`);
-  }
-  return canonical;
-}
-
-export async function buildContextPacket({ repositoryId = "", task = {}, targetFile, tokenBudget = 8000, qualityFloor = 0.95, mode = "safe", projectRoot = ".", evidence = {}, createSymbolIdentity } = {}) {
+export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 8000, qualityFloor = 0.95, mode = "safe", projectRoot = ".", evidence = {}, createSymbolIdentity } = {}) {
   const parsed = parseFile(targetFile);
-  const identity = createSymbolIdentity || ((parsed, sym) => createSymbolId({ projectRelativePath: canonicalRepoPath(projectRoot, targetFile), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }));
+  const identity = createSymbolIdentity || ((parsed, sym) => createSymbolId({ projectRelativePath: relative(projectRoot, targetFile), language: parsed.language, nodeType: sym.kind, qualifiedName: sym.qualifiedName, signature: sym.signature }));
   const fileRev = createFileRevision(parsed.code);
   const handles = new SessionHandleRegistry();
 
@@ -131,8 +102,7 @@ export async function buildContextPacket({ repositoryId = "", task = {}, targetF
     
     if (includeSource && c.body) {
       sources.push({
-        handle: c.handle, id: c.id, file: targetFile,
-        file_path: canonicalRepoPath(projectRoot, targetFile), expectedRevision: c.revision,
+        handle: c.handle, id: c.id, file: (projectRoot !== "." ? canonicalRepoPath(projectRoot, targetFile) : targetFile), expectedRevision: c.revision,
         language: parsed.language, source: c.body,
         related: { callers: [], tests: [] },
       });
@@ -206,7 +176,7 @@ export async function buildContextPacket({ repositoryId = "", task = {}, targetF
   packet.coverage_manifest = {
     protocol_version: 1,
     packet_id: packet.contextId || `ctx-${Date.now()}`,
-    repository_id: repositoryId,
+    repository_id: task.repositoryId || "",
     commit_sha: task.commitSha || "",
     covered: [],
     created_at: Math.floor(Date.now() / 1000)
@@ -216,7 +186,7 @@ export async function buildContextPacket({ repositoryId = "", task = {}, targetF
     const hash = createHash("sha256").update(src.source || "").digest("hex");
     packet.coverage_manifest.covered.push({
       kind: "exact_source",
-      file_path: src.file_path || (src.file ? canonicalRepoPath(projectRoot, src.file) : ""),
+      file_path: src.file ? (projectRoot !== "." ? relative(projectRoot, src.file).replace(/\\/g, "/") : src.file) : "",
       symbol_id: src.id,
       revision: src.expectedRevision || "",
       content_hash: hash,
@@ -229,7 +199,7 @@ export async function buildContextPacket({ repositoryId = "", task = {}, targetF
     const hash = createHash("sha256").update(serialized).digest("hex");
     packet.coverage_manifest.covered.push({
       kind: "contract",
-      file_path: contract.file_path || (contract.file ? canonicalRepoPath(projectRoot, contract.file) : ""),
+      file_path: contract.file ? (projectRoot !== "." ? relative(projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
       symbol_id: contract.id,
       revision: contract.revision || "",
       content_hash: hash,

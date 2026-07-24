@@ -17,7 +17,7 @@ import { readFileSync, existsSync, realpathSync } from "fs";
 const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 import { resolve, relative, isAbsolute, delimiter } from "node:path";
 import { randomUUID } from "crypto";
-import { buildContextPacket, canonicalRepoPath } from "./compiler/packet-builder.js";
+import { buildContextPacket } from "./compiler/packet-builder.js";
 import { IncrementalIndex } from "./compiler/incremental-index.js";
 const indexes = new Map(); // repositoryId → { root, index }
 import { artifactPut, artifactGet, artifactGetChunk, artifactCopyText, artifactPin, artifactDelete, artifactList, artifactStats, artifactGC } from "./core/artifact-store.js";
@@ -295,11 +295,7 @@ async function handleContextCreate(args) {
   const slot = requireIndex(repoId);
   const tf = await resolveInsideRoot(args.targetFile);
   if (!isInside(slot.root, tf)) throw new Error(`TARGET_OUTSIDE_REPOSITORY: ${tf} not in ${slot.root}`);
-  const legacyRepositoryId = String(args.task?.repositoryId || "").trim();
-  if (legacyRepositoryId && legacyRepositoryId !== repoId) {
-    throw new Error(`REPOSITORY_ID_MISMATCH: top-level ${repoId} vs task ${legacyRepositoryId}`);
-  }
-  const packet = await buildContextPacket({ ...args, repositoryId: repoId,  targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: slot.root });
+  const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: slot.root });
   if (slot.callGraph && args.task?.target) {
     const callers = slot.callGraph.callers(tf, args.task.target);
     const tests = slot.callGraph.getTests(tf, args.task.target);
@@ -323,7 +319,8 @@ async function handleContextCreate(args) {
     const recoveryPlan = [...(packet.qualityRecovery?.hints || [])];
     if (recoveryPlan.length > 0) {
       try {
-        const recovered = await buildContextPacket({ ...args, repositoryId: repoId, 
+        const recovered = await buildContextPacket({
+          ...args,
           targetFile: tf,
           tokenBudget: (args.tokenBudget || 8000) * 1.5,  // Expand budget by 50%
           qualityFloor: args.qualityFloor ?? 0.95,
@@ -404,16 +401,16 @@ async function handleContextExpand(args) {
       const sym = parsed.symbols.find(s => s.qualifiedName === req.symbol || s.name === req.symbol);
       if (!sym) { added.sources.push({ symbol: req.symbol, status: "not_found" }); continue; }
       const c = extractContract(sym, parsed.code, parsed.language);
-      const sid = symId(slot.root, fp, parsed, sym);
+      const sid = symId(rootForFile(fp), fp, parsed, sym);
       const srev = createSymbolRevisionFromSource(c.body || "", sym.signature);
       const h = packet.handles.register(sid, sym.qualifiedName, fp);
       if (!packet.packet.contracts.find(x => x.id === sid)) {
-        packet.packet.contracts.push({ handle: h, id: sid, revision: srev, file: fp, file_path: canonicalRepoPath(slot.root, fp), kind: sym.kind, signature: c.signature, effects: c.effects, throws: c.throws, properties: c.properties, confidence: c.confidence, range: [sym.startLine, sym.endLine] });
+        packet.packet.contracts.push({ handle: h, id: sid, revision: srev, file: fp, kind: sym.kind, signature: c.signature, effects: c.effects, throws: c.throws, properties: c.properties, confidence: c.confidence, range: [sym.startLine, sym.endLine] });
         added.contracts.push({ id: sid, handle: h, symbol: req.symbol, status: "loaded" });
         packet.layers.contracts++;
       }
       if (req.view === "source" && c.body && !packet.packet.sources.find(x => x.id === sid)) {
-        packet.packet.sources.push({ handle: h, id: sid, expectedRevision: srev, file: fp, file_path: canonicalRepoPath(slot.root, fp), language: parsed.language, source: c.body });
+        packet.packet.sources.push({ handle: h, id: sid, expectedRevision: srev, file: fp, language: parsed.language, source: c.body });
         added.sources.push({ id: sid, handle: h, symbol: req.symbol, status: "loaded", tokens: estimateTokens(c.body) });
         added.tokensAdded += estimateTokens(c.body);
         packet.layers.sources++;
@@ -475,7 +472,7 @@ async function handleContextExpand(args) {
   for (const src of sources) {
     const hash = createHash("sha256").update(src.source || "").digest("hex");
     packet.coverage_manifest.covered.push({
-      kind: "exact_source", file_path: src.file_path || (src.file ? canonicalRepoPath(slot.root, src.file) : ""),
+      kind: "exact_source", file_path: src.file ? relative(packet._projectRoot || ".", src.file).replace(/\\/g, "/") : "",
       symbol_id: src.id, revision: src.expectedRevision || "",
       content_hash: hash,
       token_count: estimateTokens(src.source || "", "code")
@@ -484,7 +481,7 @@ async function handleContextExpand(args) {
   for (const contract of contracts) {
     const hash = createHash("sha256").update(JSON.stringify(contract)).digest("hex");
     packet.coverage_manifest.covered.push({
-      kind: "contract", file_path: contract.file_path || (contract.file ? canonicalRepoPath(slot.root, contract.file) : ""),
+      kind: "contract", file_path: contract.file ? (packet._projectRoot !== "." ? relative(packet._projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
       symbol_id: contract.id, revision: contract.revision || "",
       content_hash: hash,
       token_count: estimateTokens(JSON.stringify(contract), "json")
