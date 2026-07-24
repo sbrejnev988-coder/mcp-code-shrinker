@@ -86,7 +86,7 @@ const toolDefs = [
   { name: "artifact.stats", title: "Artifact Stats", description: "Storage statistics (count, size, compression).", inputSchema: { type: "object", properties: {} } },
   { name: "artifact.gc", title: "Garbage Collect", description: "Remove expired unpinned artifacts.", inputSchema: { type: "object", properties: {} } },
   { name: "project.changed_symbols", title: "Changed Symbols", description: "Symbols changed since last scan/watch for a repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 }, limit: { type: "number", default: 50 } }, required: ["repository_id"] } },
-  { name: "context.create", title: "Create Context Packet", description: "Build L0-L3 packet with ranking + quality check.", inputSchema: { type: "object", properties: { task: { type: "object" }, targetFile: { type: "string" }, tokenBudget: { type: "number" }, qualityFloor: { type: "number" }, mode: { type: "string", enum: ["safe","balanced","aggressive"] }, projectRoot: { type: "string" }, evidence: { type: "object" } }, required: ["task","targetFile"] } },
+  { name: "context.create", title: "Create Context Packet", description: "Build L0-L3 packet with ranking + quality check. Repository-scoped.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 }, task: { type: "object" }, targetFile: { type: "string" }, tokenBudget: { type: "number" }, qualityFloor: { type: "number" }, mode: { type: "string", enum: ["safe","balanced","aggressive"] }, evidence: { type: "object" } }, required: ["repository_id","task","targetFile"] } },
   { name: "context.expand", title: "Expand Context", description: "FIXED: path validated, loads symbols into packet.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, requests: { type: "array", items: { type: "object", properties: { symbol: { type: "string" }, filePath: { type: "string" }, view: { type: "string", enum: ["source","contract"] }, reason: { type: "string" } }, required: ["symbol"] } } }, required: ["contextId","requests"] } },
   { name: "context.inspect", title: "Inspect Loss", description: "Loss manifest + quality.", inputSchema: { type: "object", properties: { contextId: { type: "string" } }, required: ["contextId"] } },
   { name: "patch.propose", title: "Propose Patch", description: "FIXED: patchId linked to validate/apply via randomUUID.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, edits: { type: "array" } }, required: ["contextId","edits"] } },
@@ -278,18 +278,23 @@ async function handleSymbolSource(args) {
 }
 
 async function handleSymbolContext(args) {
-  const repoId = String(args.repository_id || "").trim();
-  const slot = repoId ? indexes.get(repoId) : null;
-  if (!slot?.callGraph) return err("Run project.scan first for this repository");
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
+  if (!slot.callGraph) return err("Run project.scan first for this repository");
+  const filePath = await resolveInsideRoot(args.filePath);
+  if (!isInside(slot.root, filePath)) throw new Error(`FILE_OUTSIDE_REPOSITORY: ${filePath} not in ${slot.root}`);
   const result = {};
   for (const w of (args.what || [])) {
-    switch (w) { case "callers": result.callers = slot.callGraph.callers(args.filePath, args.symbol); break; case "callees": result.callees = slot.callGraph.callees(args.filePath, args.symbol); break; case "tests": result.tests = slot.callGraph.getTests(args.filePath, args.symbol); break; }
+    switch (w) { case "callers": result.callers = slot.callGraph.callers(filePath, args.symbol); break; case "callees": result.callees = slot.callGraph.callees(filePath, args.symbol); break; case "tests": result.tests = slot.callGraph.getTests(filePath, args.symbol); break; }
   }
   return ok(result);
 }
 
 async function handleContextCreate(args) {
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
   const tf = await resolveInsideRoot(args.targetFile);
+  if (!isInside(slot.root, tf)) throw new Error(`TARGET_OUTSIDE_REPOSITORY: ${tf} not in ${slot.root}`);
   const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: rootForFile(tf) });
   const cgSlot = (args.task?.repositoryId) ? indexes.get(args.task.repositoryId) : null;
   if (cgSlot?.callGraph && args.task?.target) {
@@ -380,13 +385,17 @@ async function handleContextCreate(args) {
 async function handleContextExpand(args) {
   const packet = sessions.get(args.contextId);
   if (!packet) return err(`Context not found: ${args.contextId}`);
+  const repoId = String(packet._repositoryId || "").trim();
+  const slot = repoId ? indexes.get(repoId) : null;
   const added = { sources: [], contracts: [], tokensAdded: 0 };
   const oldRev = packet.revision;
   for (const req of (args.requests || [])) {
-    // FIXED: path validation on expand requests
+    // REPO-ISOLATED: validate path against packet repository root
     let fp = req.filePath;
-    if (fp) fp = await resolveInsideRoot(fp);
-    else if (packet._targetFile) fp = packet._targetFile; else continue;
+    if (fp) {
+      fp = await resolveInsideRoot(fp);
+      if (slot && !isInside(slot.root, fp)) throw new Error(`CROSS_REPOSITORY_EXPAND: ${fp} outside ${slot.root}`);
+    } else if (packet._targetFile) fp = packet._targetFile; else continue;
     try {
       const parsed = parseFile(fp);
       const sym = parsed.symbols.find(s => s.qualifiedName === req.symbol || s.name === req.symbol);

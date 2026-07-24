@@ -102,7 +102,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     
     if (includeSource && c.body) {
       sources.push({
-        handle: c.handle, id: c.id, file: (projectRoot !== "." ? relative(projectRoot, targetFile).replace(/\\/g, "/") : targetFile), expectedRevision: c.revision,
+        handle: c.handle, id: c.id, file: (projectRoot !== "." ? canonicalRepoPath(projectRoot, targetFile) : targetFile), expectedRevision: c.revision,
         language: parsed.language, source: c.body,
         related: { callers: [], tests: [] },
       });
