@@ -416,7 +416,7 @@ async function handleContextExpand(args) {
   for (const src of sources) {
     const hash = createHash("sha256").update(src.source || "").digest("hex");
     packet.coverage_manifest.covered.push({
-      kind: "exact_source", file_path: src.file || "",
+      kind: "exact_source", file_path: src.file ? relative(packet._projectRoot || ".", src.file).replace(/\\/g, "/") : "",
       symbol_id: src.id, revision: src.expectedRevision || "",
       content_hash: `sha256:${hash}`,
       token_count: estimateTokens(src.source || "", "code")
