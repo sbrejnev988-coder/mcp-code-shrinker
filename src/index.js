@@ -31,8 +31,8 @@ const server = new Server({ name: "code-shrinker", version: PKG.version }, { cap
 const budget = new TokenBudget();
 const sessions = new Map();
 const patches = new Map(); // patchId → { contextId, edits }
-let callGraph = null;
-const validators = new Map();
+
+
 function requireRepositoryId(args) {
   const rid = String(args.repository_id || "").trim();
   if (!rid) throw new Error("repository_id is required");
@@ -216,20 +216,25 @@ function handleChangedSymbols(args) {
 
 async function handleProjectScan(args) {
   if (CONFIGURED_ROOTS.length === 0) throw new Error('NO_ALLOWED_ROOT_CONFIGURED');
+  const repoId = String(args.repository_id || "").trim();
   const root = args.path ? await resolveInsideRoot(args.path) : CONFIGURED_ROOTS[0];
-  callGraph = new CallGraph(root);
-  validators.set(root, new PatchValidator({ projectRoot: root }));
-  const stats = callGraph.scan({ exclude: args.exclude });
-  return ok({ status: "scanned", ...stats, root });
+  let slot = indexes.get(repoId);
+  if (!slot) { slot = { root, index: new IncrementalIndex(root) }; indexes.set(repoId, slot); }
+  slot.callGraph = new CallGraph(root);
+  slot.validator = new PatchValidator({ projectRoot: root });
+  const stats = slot.callGraph.scan({ exclude: args.exclude });
+  return ok({ status: "scanned", ...stats, repository_id: repoId, root });
 }
 
 async function handleProjectMap(args) {
+  const repoId = String(args.repository_id || "").trim();
   const path = await resolveInsideRoot(args.path || ".");
-  if (callGraph) {
-    const slice = callGraph.toContextSlice([path], 1);
-    return ok({ project: path, entrypoints: Object.keys(slice.symbols || {}).slice(0, 20), ...slice });
+  const slot = repoId ? indexes.get(repoId) : null;
+  if (slot?.callGraph) {
+    const slice = slot.callGraph.toContextSlice([path], 1);
+    return ok({ project: path, repository_id: repoId, entrypoints: Object.keys(slice.symbols || {}).slice(0, 20), ...slice });
   }
-  return ok({ project: path, status: "stub", note: "Run project.scan for full map" });
+  return ok({ project: path, status: "stub", note: "Run project.scan for full map", repository_id: repoId });
 }
 
 async function handleFileContracts(args) {
@@ -269,10 +274,12 @@ async function handleSymbolSource(args) {
 }
 
 async function handleSymbolContext(args) {
-  if (!callGraph) return err("Run project.scan first");
+  const repoId = String(args.repository_id || "").trim();
+  const slot = repoId ? indexes.get(repoId) : null;
+  if (!slot?.callGraph) return err("Run project.scan first for this repository");
   const result = {};
   for (const w of (args.what || [])) {
-    switch (w) { case "callers": result.callers = callGraph.callers(args.filePath, args.symbol); break; case "callees": result.callees = callGraph.callees(args.filePath, args.symbol); break; case "tests": result.tests = callGraph.getTests(args.filePath, args.symbol); break; }
+    switch (w) { case "callers": result.callers = slot.callGraph.callers(args.filePath, args.symbol); break; case "callees": result.callees = slot.callGraph.callees(args.filePath, args.symbol); break; case "tests": result.tests = slot.callGraph.getTests(args.filePath, args.symbol); break; }
   }
   return ok(result);
 }
@@ -280,9 +287,10 @@ async function handleSymbolContext(args) {
 async function handleContextCreate(args) {
   const tf = await resolveInsideRoot(args.targetFile);
   const packet = await buildContextPacket({ ...args, targetFile: tf, tokenBudget: args.tokenBudget || 8000, qualityFloor: args.qualityFloor ?? 0.95, mode: args.mode || "safe", evidence: args.evidence || {}, projectRoot: rootForFile(tf) });
-  if (callGraph && args.task?.target) {
-    const callers = callGraph.callers(tf, args.task.target);
-    const tests = callGraph.getTests(tf, args.task.target);
+  const cgSlot = (args.task?.repositoryId) ? indexes.get(args.task.repositoryId) : null;
+  if (cgSlot?.callGraph && args.task?.target) {
+    const callers = cgSlot.callGraph.callers(tf, args.task.target);
+    const tests = cgSlot.callGraph.getTests(tf, args.task.target);
     if (callers.length) packet.packet.callers = callers;
     if (tests.length) packet.packet.relatedTests = tests;
   }
@@ -526,7 +534,7 @@ async function handlePatchValidate(args) {
   if (proposed.expectedFileRevision && currentFileRev !== proposed.expectedFileRevision) return err('STALE_FILE_SINCE_CONTEXT');
   // Init validator from configured root that contains this file
   const projectRoot = rootForFile(filePath);
-  let vtor = validators.get(projectRoot); if (!vtor) { vtor = new PatchValidator({ projectRoot }); validators.set(projectRoot, vtor); }
+  let vtor; for (const s of indexes.values()) { if (s.validator && s.root === projectRoot) { vtor = s.validator; break; } } if (!vtor) { vtor = new PatchValidator({ projectRoot }); }
   const fileHash = existsSync(filePath) ? createFileRevision(readFileSync(filePath, "utf-8")) : null;
   const result = vtor.validate({ patchId: args.patchId, filePath, originalHash: fileHash, edits: proposed.edits });
   return ok(result);
@@ -538,8 +546,7 @@ async function handlePatchApply(args) {
   if (!proposed) return err('UNKNOWN_PATCH_ID');
   const fp = await resolveInsideRoot(proposed.filePath);
   const vRoot = CONFIGURED_ROOTS.find(r => isInside(r, fp)) || CONFIGURED_ROOTS[0] || resolve('.');
-  let vtor = validators.get(vRoot);
-  if (!vtor) { vtor = new PatchValidator({ projectRoot: vRoot }); validators.set(vRoot, vtor); }
+  let vtor; for (const s of indexes.values()) { if (s.validator && s.root === vRoot) { vtor = s.validator; break; } } if (!vtor) { vtor = new PatchValidator({ projectRoot: vRoot }); }
   const validation = vtor.results.get(args.patchId);
   if (!validation) return err('Validation not found — run patch.validate first');
   const result = vtor.apply({ patchId: args.patchId, filePath: fp });

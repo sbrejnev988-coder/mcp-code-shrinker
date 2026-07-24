@@ -189,7 +189,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
       file_path: src.file ? (projectRoot !== "." ? relative(projectRoot, src.file).replace(/\\/g, "/") : src.file) : "",
       symbol_id: src.id,
       revision: src.expectedRevision || "",
-      content_hash: `sha256:${hash}`,
+      content_hash: hash,
       token_count: estimateTokens(src.source || "", "code")
     });
   }
@@ -202,7 +202,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
       file_path: contract.file ? (projectRoot !== "." ? relative(projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
       symbol_id: contract.id,
       revision: contract.revision || "",
-      content_hash: `sha256:${hash}`,
+      content_hash: hash,
       token_count: estimateTokens(serialized, "json")
     });
   }
@@ -212,7 +212,7 @@ export async function buildContextPacket({ task = {}, targetFile, tokenBudget = 
     const hash = createHash("sha256").update(serialized).digest("hex");
     packet.coverage_manifest.covered.push({
       kind: ev.type === "tests" ? "test" : "diagnostic",
-      content_hash: `sha256:${hash}`,
+      content_hash: hash,
       token_count: estimateTokens(serialized, "diagnostic")
     });
   }
