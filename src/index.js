@@ -171,6 +171,7 @@ async function handleSnapshot(args) {
   }
   const slot = existing || { root: snapPath, index: new IncrementalIndex(snapPath) };
   if (!slot.index.graph._scanned) slot.index.graph.scan();
+  if (!existing) indexes.set(repoId, slot);
   return ok({ ...slot.index.snapshot(), repository_id: repoId, root: slot.root });
 }
 
@@ -452,7 +453,7 @@ async function handleContextExpand(args) {
     packet.coverage_manifest.covered.push({
       kind: "exact_source", file_path: src.file ? relative(packet._projectRoot || ".", src.file).replace(/\\/g, "/") : "",
       symbol_id: src.id, revision: src.expectedRevision || "",
-      content_hash: `sha256:${hash}`,
+      content_hash: hash,
       token_count: estimateTokens(src.source || "", "code")
     });
   }
@@ -461,7 +462,7 @@ async function handleContextExpand(args) {
     packet.coverage_manifest.covered.push({
       kind: "contract", file_path: contract.file ? (packet._projectRoot !== "." ? relative(packet._projectRoot, contract.file).replace(/\\/g, "/") : contract.file) : "",
       symbol_id: contract.id, revision: contract.revision || "",
-      content_hash: `sha256:${hash}`,
+      content_hash: hash,
       token_count: estimateTokens(JSON.stringify(contract), "json")
     });
   }
@@ -469,7 +470,7 @@ async function handleContextExpand(args) {
     const hash = createHash("sha256").update(JSON.stringify(ev.data)).digest("hex");
     packet.coverage_manifest.covered.push({
       kind: ev.type === "tests" ? "test" : "diagnostic",
-      content_hash: `sha256:${hash}`,
+      content_hash: hash,
       token_count: estimateTokens(JSON.stringify(ev.data), "diagnostic")
     });
   }
