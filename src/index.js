@@ -19,7 +19,7 @@ import { resolve, relative, isAbsolute, delimiter } from "node:path";
 import { randomUUID } from "crypto";
 import { buildContextPacket } from "./compiler/packet-builder.js";
 import { IncrementalIndex } from "./compiler/incremental-index.js";
-const indexes = new Map(); // repositoryId → IncrementalIndex
+const indexes = new Map(); // repositoryId → { root, index }
 import { artifactPut, artifactGet, artifactGetChunk, artifactCopyText, artifactPin, artifactDelete, artifactList, artifactStats, artifactGC } from "./core/artifact-store.js";
 import { parseFile, extractContract } from "./core/ast-engine.js";
 import { createSymbolId, createSymbolRevisionFromSource, createFileRevision } from "./core/symbol-id.js";
@@ -33,6 +33,17 @@ const sessions = new Map();
 const patches = new Map(); // patchId → { contextId, edits }
 let callGraph = null;
 const validators = new Map();
+function requireRepositoryId(args) {
+  const rid = String(args.repository_id || "").trim();
+  if (!rid) throw new Error("repository_id is required");
+  return rid;
+}
+function requireIndex(repositoryId) {
+  const slot = indexes.get(repositoryId);
+  if (!slot) throw new Error(`No index for repository_id=${repositoryId}. Start watcher first.`);
+  return slot;
+}
+
 const CONFIGURED_ROOTS = (process.env.CODE_SHRINKER_ALLOWED_ROOTS || '').split(delimiter).filter(Boolean).map(p => resolve(p));
 
 function isInside(root, candidate) {
@@ -61,10 +72,10 @@ const toolDefs = [
   { name: "file.contracts", title: "File Contracts (L1)", description: "Layer 1: contracts for all symbols. FIXED: includes full body ranges.", inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
   { name: "symbol.source", title: "Symbol Source (L2)", description: "EXACT source — FIXED: full function body now extracted.", inputSchema: { type: "object", properties: { filePath: { type: "string" }, symbol: { type: "string" }, view: { type: "string", enum: ["source","contract","reference"] } }, required: ["filePath","symbol"] } },
   { name: "symbol.context", title: "Symbol Context", description: "Callers/callees/tests. FIXED: edges now built.", inputSchema: { type: "object", properties: { filePath: { type: "string" }, symbol: { type: "string" }, what: { type: "array", items: { type: "string", enum: ["callers","callees","tests","sideEffects"] } } }, required: ["filePath","symbol"] } },
-  { name: "project.watch_start", title: "Start Watch", description: "Start incremental file watcher (daemon mode).", inputSchema: { type: "object", properties: { path: { type: "string" }, interval: { type: "number", description: "Poll interval ms (default 5000)" }, exclude: { type: "array", items: { type: "string" } } } } },
-  { name: "project.watch_stop", title: "Stop Watch", description: "Stop the incremental watcher.", inputSchema: { type: "object", properties: {} } },
-  { name: "project.watch_status", title: "Watch Status", description: "Current watcher state: files, symbols, change log.", inputSchema: { type: "object", properties: {} } },
-  { name: "project.snapshot", title: "Project Snapshot", description: "Take a snapshot: files, symbols, entrypoints.", inputSchema: { type: "object", properties: { path: { type: "string" } } } },
+  { name: "project.watch_start", title: "Start Watch", description: "Start incremental file watcher for a specific repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1, description: "Repository identifer (e.g. owner/repo)" }, path: { type: "string" }, interval: { type: "number", description: "Poll interval ms (default 5000)" }, exclude: { type: "array", items: { type: "string" } } }, required: ["repository_id"] } },
+  { name: "project.watch_stop", title: "Stop Watch", description: "Stop the watcher for a specific repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 } }, required: ["repository_id"] } },
+  { name: "project.watch_status", title: "Watch Status", description: "Current watcher state for a repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 } }, required: ["repository_id"] } },
+  { name: "project.snapshot", title: "Project Snapshot", description: "Take a snapshot for a repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 }, path: { type: "string" } }, required: ["repository_id"] } },
   { name: "artifact.put", title: "Store Artifact", description: "Content-addressed storage with SHA-256, compression, TTL. Returns artifact ID.", inputSchema: { type: "object", properties: { content: { type: "string", description: "Content to store (text or base64)" }, contentType: { type: "string", default: "text/plain" }, compress: { type: "boolean", default: true }, ttl: { type: "number", description: "TTL in seconds (0 = forever)" }, pin: { type: "boolean" }, sensitive: { type: "boolean" }, redacted: { type: "boolean" }, tags: { type: "array", items: { type: "string" } } }, required: ["content"] } },
   { name: "artifact.get", title: "Get Artifact", description: "Retrieve artifact by ID. Returns content as text.", inputSchema: { type: "object", properties: { artifactId: { type: "string" } }, required: ["artifactId"] } },
   { name: "artifact.get_chunk", title: "Get Chunk", description: "Read one chunk of a large artifact.", inputSchema: { type: "object", properties: { artifactId: { type: "string" }, chunkIndex: { type: "number", default: 0 } }, required: ["artifactId"] } },
@@ -74,7 +85,7 @@ const toolDefs = [
   { name: "artifact.list", title: "List Artifacts", description: "List all artifacts with metadata.", inputSchema: { type: "object", properties: { pinned: { type: "boolean" }, tag: { type: "string" }, limit: { type: "number", default: 50 } } } },
   { name: "artifact.stats", title: "Artifact Stats", description: "Storage statistics (count, size, compression).", inputSchema: { type: "object", properties: {} } },
   { name: "artifact.gc", title: "Garbage Collect", description: "Remove expired unpinned artifacts.", inputSchema: { type: "object", properties: {} } },
-  { name: "project.changed_symbols", title: "Changed Symbols", description: "Symbols changed since last scan/watch.", inputSchema: { type: "object", properties: { limit: { type: "number", default: 50 } } } },
+  { name: "project.changed_symbols", title: "Changed Symbols", description: "Symbols changed since last scan/watch for a repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 }, limit: { type: "number", default: 50 } }, required: ["repository_id"] } },
   { name: "context.create", title: "Create Context Packet", description: "Build L0-L3 packet with ranking + quality check.", inputSchema: { type: "object", properties: { task: { type: "object" }, targetFile: { type: "string" }, tokenBudget: { type: "number" }, qualityFloor: { type: "number" }, mode: { type: "string", enum: ["safe","balanced","aggressive"] }, projectRoot: { type: "string" }, evidence: { type: "object" } }, required: ["task","targetFile"] } },
   { name: "context.expand", title: "Expand Context", description: "FIXED: path validated, loads symbols into packet.", inputSchema: { type: "object", properties: { contextId: { type: "string" }, requests: { type: "array", items: { type: "object", properties: { symbol: { type: "string" }, filePath: { type: "string" }, view: { type: "string", enum: ["source","contract"] }, reason: { type: "string" } }, required: ["symbol"] } } }, required: ["contextId","requests"] } },
   { name: "context.inspect", title: "Inspect Loss", description: "Loss manifest + quality.", inputSchema: { type: "object", properties: { contextId: { type: "string" } }, required: ["contextId"] } },
@@ -120,36 +131,44 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 async function handleWatchStart(args) {
+  const repoId = requireRepositoryId(args);
   const watchPath = await resolveInsideRoot(args.path || ".");
-  const repoId = String(args.repository_id || watchPath).trim();
-  let index = indexes.get(repoId);
-  if (!index) { index = new IncrementalIndex(watchPath); indexes.set(repoId, index); }
+  const existing = indexes.get(repoId);
+  if (existing) {
+    if (existing.root !== watchPath) throw new Error(`REPOSITORY_ROOT_MISMATCH: ${repoId} bound to ${existing.root}, not ${watchPath}`);
+    return ok({ watching: true, repository_id: repoId, root: watchPath, note: "already watching" });
+  }
+  const index = new IncrementalIndex(watchPath);
+  indexes.set(repoId, { root: watchPath, index });
   const result = index.start({ interval: args.interval || 5000, exclude: args.exclude });
   return ok({ watching: result.watching, repository_id: repoId, root: watchPath });
 }
 
-function handleWatchStop(args) {
-  if (indexes.size === 0) return ok({ watching: false });
-  const last = [...indexes.entries()].pop();
-  const result = last[1].stop();
-  indexes.delete(last[0]);
-  return ok(result);
+async function handleWatchStop(args) {
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
+  const result = slot.index.stop();
+  indexes.delete(repoId);
+  return ok({ status: "stopped", repository_id: repoId, root: slot.root });
 }
 
 function handleWatchStatus(args) {
-  const repoId = String(args.repository_id || "").trim();
-  const index = repoId ? indexes.get(repoId) : (indexes.size > 0 ? [...indexes.values()][0] : null);
-  if (!index) return ok({ watching: false, files: 0, indexes: indexes.size });
-  return ok({ ...index.status(), repository_id: repoId || "default", indexes: indexes.size });
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
+  return ok({ ...slot.index.status(), repository_id: repoId, root: slot.root, indexes: indexes.size });
 }
 
 async function handleSnapshot(args) {
+  const repoId = requireRepositoryId(args);
   const snapPath = await resolveInsideRoot(args.path || ".");
-  const repoId = String(args.repository_id || snapPath).trim();
-  let index = indexes.get(repoId);
-  if (!index) { index = new IncrementalIndex(snapPath); indexes.set(repoId, index); }
-  if (!index.graph._scanned) index.graph.scan();
-  return ok({ ...index.snapshot(), repository_id: repoId, root: snapPath });
+  const existing = indexes.get(repoId);
+  if (existing) {
+    if (existing.root !== snapPath) throw new Error(`REPOSITORY_ROOT_MISMATCH: ${repoId} bound to ${existing.root}, not ${snapPath}`);
+  }
+  const slot = existing || { root: snapPath, index: new IncrementalIndex(snapPath) };
+  if (!existing) indexes.set(repoId, slot);
+  if (!slot.index.graph._scanned) slot.index.graph.scan();
+  return ok({ ...slot.index.snapshot(), repository_id: repoId, root: slot.root });
 }
 
 function handleArtifactPut(args) {
@@ -186,10 +205,9 @@ function handleArtifactGC(args) {
   return ok(artifactGC());
 }
 function handleChangedSymbols(args) {
-  const repoId = String(args.repository_id || "").trim();
-  const index = repoId ? indexes.get(repoId) : (indexes.size > 0 ? [...indexes.values()][0] : null);
-  if (!index) return ok([]);
-  return ok(index.changedSymbols().slice(0, args.limit || 50));
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
+  return ok(slot.index.changedSymbols().slice(0, args.limit || 50));
 }
 
 async function handleProjectScan(args) {
