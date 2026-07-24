@@ -132,16 +132,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 async function handleWatchStart(args) {
   const repoId = requireRepositoryId(args);
-  const watchPath = await resolveInsideRoot(args.path || ".");
   const existing = indexes.get(repoId);
+  const watchPath = args.path
+    ? await resolveInsideRoot(args.path)
+    : existing?.root ?? await resolveInsideRoot(".");
   if (existing) {
     if (existing.root !== watchPath) throw new Error(`REPOSITORY_ROOT_MISMATCH: ${repoId} bound to ${existing.root}, not ${watchPath}`);
-    return ok({ watching: true, repository_id: repoId, root: watchPath, note: "already watching" });
+    if (existing.index.status().watching) return ok({ ...existing.index.status(), repository_id: repoId, root: watchPath, note: "already watching" });
   }
-  const index = new IncrementalIndex(watchPath);
-  indexes.set(repoId, { root: watchPath, index });
-  const result = index.start({ interval: args.interval || 5000, exclude: args.exclude });
-  return ok({ watching: result.watching, repository_id: repoId, root: watchPath });
+  const slot = existing || { root: watchPath, index: new IncrementalIndex(watchPath) };
+  const result = slot.index.start({ interval: args.interval || 5000, exclude: args.exclude });
+  indexes.set(repoId, slot);
+  return ok({ ...result, repository_id: repoId, root: watchPath });
 }
 
 async function handleWatchStop(args) {
@@ -160,13 +162,14 @@ function handleWatchStatus(args) {
 
 async function handleSnapshot(args) {
   const repoId = requireRepositoryId(args);
-  const snapPath = await resolveInsideRoot(args.path || ".");
   const existing = indexes.get(repoId);
+  const snapPath = args.path
+    ? await resolveInsideRoot(args.path)
+    : existing?.root ?? await resolveInsideRoot(".");
   if (existing) {
     if (existing.root !== snapPath) throw new Error(`REPOSITORY_ROOT_MISMATCH: ${repoId} bound to ${existing.root}, not ${snapPath}`);
   }
   const slot = existing || { root: snapPath, index: new IncrementalIndex(snapPath) };
-  if (!existing) indexes.set(repoId, slot);
   if (!slot.index.graph._scanned) slot.index.graph.scan();
   return ok({ ...slot.index.snapshot(), repository_id: repoId, root: slot.root });
 }
