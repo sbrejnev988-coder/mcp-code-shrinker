@@ -377,11 +377,12 @@ async function handleContextExpand(args) {
   packet.estimatedQuality = Math.round(estQ * 100) / 100;
   packet.qualitySatisfied = packet.estimatedQuality >= (packet._qualityFloor || 0.95);
   
-  // Update loss manifest
+  // Update loss manifest — only subtract newly added IDs (not all sources)
   if (packet.loss) {
-    packet.loss.removed.symbols = Math.max(0, (packet.loss.removed.symbols || 0) - sources.length);
-    packet.loss.removedSymbolIds = (packet.loss.removedSymbolIds || []).filter(id => !sources.some(s => s.id === id));
-    packet.loss.removed.bodies = Math.max(0, (packet.loss.removed.bodies || 0) - sources.length);
+    const newlyRestoredIds = new Set((added.sources || []).map(s => s.handle));
+    packet.loss.removedSymbolIds = (packet.loss.removedSymbolIds || []).filter(id => !newlyRestoredIds.has(id));
+    packet.loss.removed.symbols = packet.loss.removedSymbolIds.length;
+    packet.loss.removed.bodies = Math.max(0, packet.loss.removed.bodies - (added.tokensAdded > 0 ? 1 : 0));
     packet.loss.preserved.targetSource = hasTarget;
   }
   
