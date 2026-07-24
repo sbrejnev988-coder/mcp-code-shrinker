@@ -261,13 +261,16 @@ async function handleProjectMap(args) {
 }
 
 async function handleFileContracts(args) {
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
   const fp = await resolveInsideRoot(args.filePath);
+  if (!isInside(slot.root, fp)) return err(`PATH_OUTSIDE_REPOSITORY: ${fp}`);
   const parsed = parseFile(fp);
   const rev = createFileRevision(parsed.code);
   const contracts = parsed.symbols.map(sym => {
     const c = extractContract(sym, parsed.code, parsed.language);
     return {
-      id: symId(rootForFile(fp), fp, parsed, sym),
+      id: symId(slot.root, fp, parsed, sym),
       revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
       handle: `@${sym.qualifiedName}`, kind: sym.kind, signature: c.signature, visibility: c.visibility,
       effects: c.effects, throws: c.throws, calls: c.calls, properties: c.properties, confidence: c.confidence,
@@ -278,13 +281,16 @@ async function handleFileContracts(args) {
 }
 
 async function handleSymbolSource(args) {
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
   const fp = await resolveInsideRoot(args.filePath);
+  if (!isInside(slot.root, fp)) return err(`PATH_OUTSIDE_REPOSITORY: ${fp}`);
   const parsed = parseFile(fp);
   const sym = parsed.symbols.find(s => s.qualifiedName === args.symbol || s.name === args.symbol);
   if (!sym) return err(`Symbol not found: ${args.symbol}`);
   const c = extractContract(sym, parsed.code, parsed.language);
   const result = {
-    id: symId(rootForFile(fp), fp, parsed, sym),
+    id: symId(slot.root, fp, parsed, sym),
     revision: createSymbolRevisionFromSource(c.body || "", sym.signature),
     fileRevision: createFileRevision(parsed.code), handle: `@${sym.qualifiedName}`, kind: sym.kind, language: parsed.language,
     range: [sym.startLine, sym.endLine],
