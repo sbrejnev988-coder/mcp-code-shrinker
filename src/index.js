@@ -67,11 +67,11 @@ async function resolveInsideRoot(inputPath) {
 }
 
 const toolDefs = [
-  { name: "project.scan", title: "Scan Project", description: "Build cross-file call graph. Required before symbol.context.", inputSchema: { type: "object", properties: { path: { type: "string" }, exclude: { type: "array", items: { type: "string" } } } } },
-  { name: "project.map", title: "Project Map (L0)", description: "Layer 0: file tree + exports.", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "project.scan", title: "Scan Project", description: "Build cross-file call graph for a repository. Required before symbol.context.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 }, path: { type: "string" }, exclude: { type: "array", items: { type: "string" } } }, required: ["repository_id", "path"] } },
+  { name: "project.map", title: "Project Map (L0)", description: "Layer 0: file tree + exports for a repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 }, path: { type: "string" } }, required: ["repository_id", "path"] } },
   { name: "file.contracts", title: "File Contracts (L1)", description: "Layer 1: contracts for all symbols. FIXED: includes full body ranges.", inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
   { name: "symbol.source", title: "Symbol Source (L2)", description: "EXACT source — FIXED: full function body now extracted.", inputSchema: { type: "object", properties: { filePath: { type: "string" }, symbol: { type: "string" }, view: { type: "string", enum: ["source","contract","reference"] } }, required: ["filePath","symbol"] } },
-  { name: "symbol.context", title: "Symbol Context", description: "Callers/callees/tests. FIXED: edges now built.", inputSchema: { type: "object", properties: { filePath: { type: "string" }, symbol: { type: "string" }, what: { type: "array", items: { type: "string", enum: ["callers","callees","tests","sideEffects"] } } }, required: ["filePath","symbol"] } },
+  { name: "symbol.context", title: "Symbol Context", description: "Callers/callees/tests for a repository. REPO-ISOLATED.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 }, filePath: { type: "string" }, symbol: { type: "string" }, what: { type: "array", items: { type: "string", enum: ["callers","callees","tests","sideEffects"] } } }, required: ["repository_id","filePath","symbol"] } },
   { name: "project.watch_start", title: "Start Watch", description: "Start incremental file watcher for a specific repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1, description: "Repository identifer (e.g. owner/repo)" }, path: { type: "string" }, interval: { type: "number", description: "Poll interval ms (default 5000)" }, exclude: { type: "array", items: { type: "string" } } }, required: ["repository_id"] } },
   { name: "project.watch_stop", title: "Stop Watch", description: "Stop the watcher for a specific repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 } }, required: ["repository_id"] } },
   { name: "project.watch_status", title: "Watch Status", description: "Current watcher state for a repository.", inputSchema: { type: "object", properties: { repository_id: { type: "string", minLength: 1 } }, required: ["repository_id"] } },
@@ -216,25 +216,29 @@ function handleChangedSymbols(args) {
 
 async function handleProjectScan(args) {
   if (CONFIGURED_ROOTS.length === 0) throw new Error('NO_ALLOWED_ROOT_CONFIGURED');
-  const repoId = String(args.repository_id || "").trim();
-  const root = args.path ? await resolveInsideRoot(args.path) : CONFIGURED_ROOTS[0];
-  let slot = indexes.get(repoId);
-  if (!slot) { slot = { root, index: new IncrementalIndex(root) }; indexes.set(repoId, slot); }
+  const repoId = requireRepositoryId(args);
+  const root = await resolveInsideRoot(args.path);
+  const existing = indexes.get(repoId);
+  if (existing && existing.root !== root)
+    throw new Error(`REPOSITORY_ROOT_MISMATCH: ${repoId} bound to ${existing.root}, not ${root}`);
+  const slot = existing || { root, index: new IncrementalIndex(root) };
   slot.callGraph = new CallGraph(root);
   slot.validator = new PatchValidator({ projectRoot: root });
+  if (!existing) indexes.set(repoId, slot);
   const stats = slot.callGraph.scan({ exclude: args.exclude });
   return ok({ status: "scanned", ...stats, repository_id: repoId, root });
 }
 
 async function handleProjectMap(args) {
-  const repoId = String(args.repository_id || "").trim();
-  const path = await resolveInsideRoot(args.path || ".");
-  const slot = repoId ? indexes.get(repoId) : null;
-  if (slot?.callGraph) {
+  const repoId = requireRepositoryId(args);
+  const slot = requireIndex(repoId);
+  const path = await resolveInsideRoot(args.path);
+  if (path !== slot.root) throw new Error(`REPOSITORY_ROOT_MISMATCH: requested ${path} vs bound ${slot.root}`);
+  if (slot.callGraph) {
     const slice = slot.callGraph.toContextSlice([path], 1);
     return ok({ project: path, repository_id: repoId, entrypoints: Object.keys(slice.symbols || {}).slice(0, 20), ...slice });
   }
-  return ok({ project: path, status: "stub", note: "Run project.scan for full map", repository_id: repoId });
+  return ok({ project: path, status: "stub", repository_id: repoId, note: "Run project.scan first" });
 }
 
 async function handleFileContracts(args) {
