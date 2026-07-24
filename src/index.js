@@ -19,7 +19,7 @@ import { resolve, relative, isAbsolute, delimiter } from "node:path";
 import { randomUUID } from "crypto";
 import { buildContextPacket } from "./compiler/packet-builder.js";
 import { IncrementalIndex } from "./compiler/incremental-index.js";
-let incIndex = null;
+const indexes = new Map(); // repositoryId → IncrementalIndex
 import { artifactPut, artifactGet, artifactGetChunk, artifactCopyText, artifactPin, artifactDelete, artifactList, artifactStats, artifactGC } from "./core/artifact-store.js";
 import { parseFile, extractContract } from "./core/ast-engine.js";
 import { createSymbolId, createSymbolRevisionFromSource, createFileRevision } from "./core/symbol-id.js";
@@ -121,26 +121,35 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 async function handleWatchStart(args) {
   const watchPath = await resolveInsideRoot(args.path || ".");
-  if (!incIndex) incIndex = new IncrementalIndex(watchPath);
-  const result = incIndex.start({ interval: args.interval || 5000, exclude: args.exclude });
-  return ok(result);
+  const repoId = String(args.repository_id || watchPath).trim();
+  let index = indexes.get(repoId);
+  if (!index) { index = new IncrementalIndex(watchPath); indexes.set(repoId, index); }
+  const result = index.start({ interval: args.interval || 5000, exclude: args.exclude });
+  return ok({ watching: result.watching, repository_id: repoId, root: watchPath });
 }
 
 function handleWatchStop(args) {
-  if (!incIndex) return ok({ watching: false });
-  return ok(incIndex.stop());
+  if (indexes.size === 0) return ok({ watching: false });
+  const last = [...indexes.entries()].pop();
+  const result = last[1].stop();
+  indexes.delete(last[0]);
+  return ok(result);
 }
 
 function handleWatchStatus(args) {
-  if (!incIndex) return ok({ watching: false, files: 0 });
-  return ok(incIndex.status());
+  const repoId = String(args.repository_id || "").trim();
+  const index = repoId ? indexes.get(repoId) : (indexes.size > 0 ? [...indexes.values()][0] : null);
+  if (!index) return ok({ watching: false, files: 0, indexes: indexes.size });
+  return ok({ ...index.status(), repository_id: repoId || "default", indexes: indexes.size });
 }
 
 async function handleSnapshot(args) {
   const snapPath = await resolveInsideRoot(args.path || ".");
-  const idx = incIndex || new IncrementalIndex(snapPath);
-  if (!incIndex) { idx.graph.scan(); incIndex = idx; }
-  return ok(idx.snapshot());
+  const repoId = String(args.repository_id || snapPath).trim();
+  let index = indexes.get(repoId);
+  if (!index) { index = new IncrementalIndex(snapPath); indexes.set(repoId, index); }
+  if (!index.graph._scanned) index.graph.scan();
+  return ok({ ...index.snapshot(), repository_id: repoId, root: snapPath });
 }
 
 function handleArtifactPut(args) {
@@ -177,8 +186,10 @@ function handleArtifactGC(args) {
   return ok(artifactGC());
 }
 function handleChangedSymbols(args) {
-  if (!incIndex) return ok([]);
-  return ok(incIndex.changedSymbols().slice(0, args.limit || 50));
+  const repoId = String(args.repository_id || "").trim();
+  const index = repoId ? indexes.get(repoId) : (indexes.size > 0 ? [...indexes.values()][0] : null);
+  if (!index) return ok([]);
+  return ok(index.changedSymbols().slice(0, args.limit || 50));
 }
 
 async function handleProjectScan(args) {
