@@ -350,12 +350,12 @@ async function handleContextExpand(args) {
       const h = packet.handles.register(sid, sym.qualifiedName, fp);
       if (!packet.packet.contracts.find(x => x.id === sid)) {
         packet.packet.contracts.push({ handle: h, id: sid, revision: srev, file: fp, kind: sym.kind, signature: c.signature, effects: c.effects, throws: c.throws, properties: c.properties, confidence: c.confidence, range: [sym.startLine, sym.endLine] });
-        added.contracts.push({ handle: h, symbol: req.symbol, status: "loaded" });
+        added.contracts.push({ id: sid, handle: h, symbol: req.symbol, status: "loaded" });
         packet.layers.contracts++;
       }
       if (req.view === "source" && c.body && !packet.packet.sources.find(x => x.id === sid)) {
         packet.packet.sources.push({ handle: h, id: sid, expectedRevision: srev, file: fp, language: parsed.language, source: c.body });
-        added.sources.push({ handle: h, symbol: req.symbol, status: "loaded", tokens: estimateTokens(c.body) });
+        added.sources.push({ id: sid, handle: h, symbol: req.symbol, status: "loaded", tokens: estimateTokens(c.body) });
         added.tokensAdded += estimateTokens(c.body);
         packet.layers.sources++;
       }
