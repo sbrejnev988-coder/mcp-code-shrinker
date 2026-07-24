@@ -417,7 +417,7 @@ async function handleContextExpand(args) {
     if (fp) {
       fp = await resolveInsideRoot(fp);
       if (!isInside(slot.root, fp)) throw new Error(`CROSS_REPOSITORY_EXPAND: ${fp} outside ${slot.root}`);
-    } else if (packet._targetFile) fp = packet._targetFile; else continue;
+    } else if (packet._targetFile) { fp = await resolveInsideRoot(packet._targetFile); } else continue;
     try {
       const parsed = parseFile(fp);
       const sym = parsed.symbols.find(s => s.qualifiedName === req.symbol || s.name === req.symbol);
