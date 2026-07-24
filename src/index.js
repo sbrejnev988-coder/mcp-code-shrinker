@@ -119,8 +119,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   } catch (e) { return err(`${name}: ${e.message}`); }
 });
 
-function handleWatchStart(args) {
-  if (!incIndex) incIndex = new IncrementalIndex(args.path || ".");
+async function handleWatchStart(args) {
+  const watchPath = await resolveInsideRoot(args.path || ".");
+  if (!incIndex) incIndex = new IncrementalIndex(watchPath);
   const result = incIndex.start({ interval: args.interval || 5000, exclude: args.exclude });
   return ok(result);
 }
@@ -135,8 +136,9 @@ function handleWatchStatus(args) {
   return ok(incIndex.status());
 }
 
-function handleSnapshot(args) {
-  const idx = incIndex || new IncrementalIndex(args.path || ".");
+async function handleSnapshot(args) {
+  const snapPath = await resolveInsideRoot(args.path || ".");
+  const idx = incIndex || new IncrementalIndex(snapPath);
   if (!incIndex) { idx.graph.scan(); incIndex = idx; }
   return ok(idx.snapshot());
 }
